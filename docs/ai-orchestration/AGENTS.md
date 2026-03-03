@@ -140,3 +140,10 @@
 - `docs/ai-orchestration/experts/forum-prompt-architect/CHECKLIST.md`
 - `docs/ai-orchestration/experts/forum-prompt-architect/SOURCES.md`
 - `docs/ai-orchestration/experts/forum-prompt-architect/PROMPT.md`
+
+### Режим использования (компромисс)
+- Для задач разработки по умолчанию: **architect-first** (сначала Forum Prompt Architect).
+- Исключение: **trivial tasks** (очень простые/мелкие тикеты) — можно без эксперт-агента.
+- Ручной override:
+  - `full architect` — всегда через эксперт-агента
+  - `skip architect` — выполнить без эксперт-агента
