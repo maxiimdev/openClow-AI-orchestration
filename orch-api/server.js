@@ -40,7 +40,7 @@ function auth(req, res, next) {
 }
 
 app.get('/health', (_req, res) => {
-  res.json({ ok: true, service: 'orch-api', version: '0.1.0' });
+  res.json({ ok: true, service: 'orch-api', version: '0.2.0' });
 });
 
 app.post('/api/enqueue', auth, (req, res) => {
@@ -58,7 +58,8 @@ app.post('/api/enqueue', auth, (req, res) => {
     createdAt: new Date().toISOString(),
     claimedAt: null,
     claimedBy: null,
-    result: null
+    result: null,
+    events: []
   });
   saveStore(db);
   res.json({ ok: true, status: 'queued', taskId: t.taskId });
@@ -89,6 +90,35 @@ app.post('/api/worker/pull', auth, (req, res) => {
       contextSnippets: task.contextSnippets || []
     }
   });
+});
+
+app.post('/api/worker/event', auth, (req, res) => {
+  const { workerId, taskId, status, phase, message, meta, ts } = req.body || {};
+  if (!workerId || !taskId || !status) {
+    return res.status(400).json({ ok: false, error: 'workerId, taskId, status required' });
+  }
+
+  const allowed = new Set(['claimed', 'started', 'progress', 'completed', 'failed', 'timeout', 'rejected']);
+  if (!allowed.has(status)) return res.status(400).json({ ok: false, error: 'invalid status' });
+
+  const db = loadStore();
+  const task = db.tasks.find(x => x.taskId === taskId);
+  if (!task) return res.status(404).json({ ok: false, error: 'task not found' });
+
+  const msg = String(message || '').slice(0, 1000);
+  if (!Array.isArray(task.events)) task.events = [];
+  task.events.push({
+    workerId,
+    status,
+    phase: phase || 'other',
+    message: msg,
+    meta: meta || {},
+    ts: ts || new Date().toISOString(),
+    receivedAt: new Date().toISOString()
+  });
+  saveStore(db);
+
+  res.json({ ok: true });
 });
 
 app.post('/api/worker/result', auth, (req, res) => {
