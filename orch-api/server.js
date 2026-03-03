@@ -51,13 +51,34 @@ async function notifyTelegram(ev) {
   if (isDuplicate(key, TG_DEDUPE_TTL_MS)) return;
 
   const icon = ({ completed: '✅', failed: '❌', timeout: '⏱️', rejected: '🚫', progress: '🔄', started: '🟦', claimed: '🟨' })[ev.status] || 'ℹ️';
+  const statusRu = {
+    claimed: 'задача принята воркером',
+    started: 'начата проверка задачи',
+    progress: 'выполняется',
+    completed: 'задача выполнена',
+    failed: 'задача завершилась с ошибкой',
+    timeout: 'задача прервана по таймауту',
+    rejected: 'задача отклонена'
+  }[ev.status] || ev.status;
+  const phaseRu = {
+    pull: 'получение',
+    validate: 'валидация',
+    git: 'git-этап',
+    claude: 'выполнение Claude',
+    push: 'публикация',
+    pr: 'создание PR',
+    report: 'отчёт'
+  }[ev.phase] || (ev.phase || 'этап');
+
   const meta = [];
-  if (ev.meta?.durationMs != null) meta.push(`duration: ${Math.round(Number(ev.meta.durationMs)/100)/10}s`);
-  if (ev.meta?.exitCode != null) meta.push(`exit: ${ev.meta.exitCode}`);
+  if (ev.meta?.durationMs != null) meta.push(`время: ${Math.round(Number(ev.meta.durationMs)/100)/10}с`);
+  if (ev.meta?.exitCode != null) meta.push(`код выхода: ${ev.meta.exitCode}`);
+
   const text = [
-    `${icon} [${ev.status}/${ev.phase || 'other'}] ${ev.taskId}`,
+    `${icon} ${ev.taskId}`,
+    `${statusRu} (${phaseRu})`,
     ev.message || '',
-    meta.join(' | ')
+    meta.join(' · ')
   ].filter(Boolean).join('\n');
 
   const url = `https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage`;
