@@ -5,6 +5,10 @@ import path from 'path';
 const PORT = Number(process.env.PORT || 18888);
 const ORCH_API_TOKEN = process.env.ORCH_API_TOKEN || '';
 const DATA_FILE = process.env.DATA_FILE || './data/queue.json';
+const TG_NOTIFY_ENABLED = String(process.env.TG_NOTIFY_ENABLED || 'false').toLowerCase() === 'true';
+const TG_BOT_TOKEN = process.env.TG_BOT_TOKEN || '';
+const TG_CHAT_ID = process.env.TG_CHAT_ID || '';
+const TG_DEDUPE_TTL_MS = Number(process.env.TG_DEDUPE_TTL_MS || 15000);
 
 if (!ORCH_API_TOKEN) {
   console.error('[orch-api] ORCH_API_TOKEN is required');
@@ -30,6 +34,52 @@ function loadStore() {
 }
 function saveStore(data) {
   fs.writeFileSync(STORE, JSON.stringify(data, null, 2));
+}
+
+const dedupeMap = new Map();
+function isDuplicate(eventKey, ttlMs) {
+  const now = Date.now();
+  const prev = dedupeMap.get(eventKey);
+  dedupeMap.set(eventKey, now);
+  if (!prev) return false;
+  return (now - prev) < ttlMs;
+}
+
+async function notifyTelegram(ev) {
+  if (!TG_NOTIFY_ENABLED || !TG_BOT_TOKEN || !TG_CHAT_ID) return;
+  const key = `${ev.taskId}:${ev.status}:${ev.phase || 'other'}:${ev.message || ''}`;
+  if (isDuplicate(key, TG_DEDUPE_TTL_MS)) return;
+
+  const icon = ({ completed: '✅', failed: '❌', timeout: '⏱️', rejected: '🚫', progress: '🔄', started: '🟦', claimed: '🟨' })[ev.status] || 'ℹ️';
+  const meta = [];
+  if (ev.meta?.durationMs != null) meta.push(`duration: ${Math.round(Number(ev.meta.durationMs)/100)/10}s`);
+  if (ev.meta?.exitCode != null) meta.push(`exit: ${ev.meta.exitCode}`);
+  const text = [
+    `${icon} [${ev.status}/${ev.phase || 'other'}] ${ev.taskId}`,
+    ev.message || '',
+    meta.join(' | ')
+  ].filter(Boolean).join('\n');
+
+  const url = `https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage`;
+  const body = {
+    chat_id: TG_CHAT_ID,
+    text,
+    disable_web_page_preview: true
+  };
+
+  try {
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    if (!r.ok) {
+      const t = await r.text().catch(() => '');
+      console.warn('[orch-api] telegram notify failed', r.status, t.slice(0, 200));
+    }
+  } catch (e) {
+    console.warn('[orch-api] telegram notify error', e?.message || String(e));
+  }
 }
 
 function auth(req, res, next) {
@@ -117,6 +167,16 @@ app.post('/api/worker/event', auth, (req, res) => {
     receivedAt: new Date().toISOString()
   });
   saveStore(db);
+
+  notifyTelegram({
+    taskId,
+    workerId,
+    status,
+    phase: phase || 'other',
+    message: msg,
+    meta: meta || {},
+    ts: ts || new Date().toISOString()
+  });
 
   res.json({ ok: true });
 });
