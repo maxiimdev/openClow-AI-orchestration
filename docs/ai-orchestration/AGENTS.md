@@ -125,3 +125,18 @@
 3. есть измеримая польза от выделения роли.
 
 Иначе — оставляем систему компактной.
+
+---
+
+## Эксперт-агент v1: Forum Prompt Architect
+Добавлен отдельный узкий эксперт для этапа `plan`:
+- готовит Task Package из сырого тикета;
+- формирует senior-grade prompt для Claude Code;
+- не исполняет код напрямую.
+
+Ресурсы:
+- `docs/ai-orchestration/experts/forum-prompt-architect/ROLE.md`
+- `docs/ai-orchestration/experts/forum-prompt-architect/RULES.md`
+- `docs/ai-orchestration/experts/forum-prompt-architect/CHECKLIST.md`
+- `docs/ai-orchestration/experts/forum-prompt-architect/SOURCES.md`
+- `docs/ai-orchestration/experts/forum-prompt-architect/PROMPT.md`
