@@ -1,0 +1,16 @@
+{
+  "name": "tg-notifier",
+  "version": "0.1.0",
+  "description": "Telegram notifier for worker task events",
+  "main": "notifier.js",
+  "scripts": {
+    "start": "node notifier.js"
+  },
+  "dependencies": {
+    "express": "^4.21.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "private": true
+}

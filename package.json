@@ -1,0 +1,15 @@
+{
+  "name": "claude-worker",
+  "version": "1.0.0",
+  "description": "Local pull-based worker for Claude Code orchestration",
+  "main": "worker.js",
+  "scripts": {
+    "start": "node worker.js",
+    "dry-test": "node test-dry-run.js"
+  },
+  "dependencies": {},
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "private": true
+}
