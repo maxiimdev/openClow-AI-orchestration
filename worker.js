@@ -889,14 +889,24 @@ async function mainLoop() {
         stepIndex: stepTotal,
         stepTotal,
       });
-      await apiPost("/api/worker/result", {
+      const resultBody = {
         workerId: CFG.workerId,
         taskId: task.taskId,
         status: result.status,
         mode: task.mode,
         output: result.output,
         meta: result.meta,
-      });
+      };
+      // For needs_input: hoist question/options/context to top-level so the
+      // orchestrator can store them directly on task.question / task.options
+      // without having to dig into meta. meta fields are preserved for compat.
+      if (result.status === "needs_input") {
+        resultBody.question = result.meta.question ?? null;
+        resultBody.options = result.meta.options ?? null;
+        resultBody.context = result.meta.context ?? null;
+        resultBody.needsInputAt = result.meta.needsInputAt ?? null;
+      }
+      await apiPost("/api/worker/result", resultBody);
 
       resetBackoff();
     } catch (err) {

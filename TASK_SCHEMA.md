@@ -211,6 +211,17 @@ Content-Type: application/json
 | `meta.exitCode` | number or null | Claude CLI exit code (null for `dry_run`, timeout, spawn error) |
 | `meta.model` | string | Model used (`sonnet` or `opus`) |
 
+### Additional top-level fields for `needs_input`
+
+When `status` is `needs_input`, the worker also adds these fields at the top level of the result body (in addition to the `meta.*` equivalents below) so the orchestrator can store `task.question` and `task.options` directly without digging into `meta`.
+
+| Field | Type | Description |
+|---|---|---|
+| `question` | string | Claude's question (same as `meta.question`) |
+| `options` | string[] or null | Normalized answer choices (same as `meta.options`) |
+| `context` | string or null | Additional context (same as `meta.context`) |
+| `needsInputAt` | string | ISO-8601 timestamp (same as `meta.needsInputAt`) |
+
 ### Additional `meta` fields for `needs_input`
 
 | Field | Type | Description |
