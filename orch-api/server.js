@@ -111,7 +111,7 @@ function auth(req, res, next) {
 }
 
 app.get('/health', (_req, res) => {
-  res.json({ ok: true, service: 'orch-api', version: '0.2.0' });
+  res.json({ ok: true, service: 'orch-api', version: '0.3.0' });
 });
 
 app.post('/api/enqueue', auth, (req, res) => {
@@ -130,7 +130,11 @@ app.post('/api/enqueue', auth, (req, res) => {
     claimedAt: null,
     claimedBy: null,
     result: null,
-    events: []
+    events: [],
+    question: null,
+    options: null,
+    pendingAnswer: null,
+    needsInputAt: null
   });
   saveStore(db);
   res.json({ ok: true, status: 'queued', taskId: t.taskId });
@@ -149,6 +153,10 @@ app.post('/api/worker/pull', auth, (req, res) => {
   task.claimedBy = workerId;
   saveStore(db);
 
+  const answer = task.pendingAnswer || null;
+  task.pendingAnswer = null;
+  saveStore(db);
+
   res.json({
     ok: true,
     task: {
@@ -158,7 +166,10 @@ app.post('/api/worker/pull', auth, (req, res) => {
       summary: task.summary,
       instructions: task.instructions,
       constraints: task.constraints || [],
-      contextSnippets: task.contextSnippets || []
+      contextSnippets: task.contextSnippets || [],
+      pendingAnswer: answer,
+      question: task.question || null,
+      options: task.options || null
     }
   });
 });
@@ -202,13 +213,43 @@ app.post('/api/worker/event', auth, (req, res) => {
   res.json({ ok: true });
 });
 
+app.post('/api/task/resume', auth, (req, res) => {
+  const { taskId, answer, answeredBy } = req.body || {};
+  if (!taskId || !answer) {
+    return res.status(400).json({ ok: false, error: 'taskId and answer required' });
+  }
+
+  const db = loadStore();
+  const task = db.tasks.find(x => x.taskId === taskId);
+  if (!task) return res.status(404).json({ ok: false, error: 'task not found' });
+  if (task.status !== 'needs_input') {
+    return res.status(409).json({ ok: false, error: `task status must be needs_input, got ${task.status}` });
+  }
+
+  task.pendingAnswer = String(answer);
+  task.status = 'queued';
+  if (!Array.isArray(task.events)) task.events = [];
+  task.events.push({
+    workerId: answeredBy || 'operator',
+    status: 'resumed',
+    phase: 'report',
+    message: 'resume answer received',
+    meta: {},
+    ts: new Date().toISOString(),
+    receivedAt: new Date().toISOString()
+  });
+  saveStore(db);
+
+  res.json({ ok: true, taskId, status: 'queued' });
+});
+
 app.post('/api/worker/result', auth, (req, res) => {
-  const { workerId, taskId, status, output, meta } = req.body || {};
+  const { workerId, taskId, status, output, meta, question, options, context } = req.body || {};
   if (!workerId || !taskId || !status) {
     return res.status(400).json({ ok: false, error: 'workerId, taskId, status required' });
   }
 
-  const allowed = new Set(['completed', 'failed', 'timeout', 'rejected']);
+  const allowed = new Set(['completed', 'failed', 'timeout', 'rejected', 'needs_input']);
   if (!allowed.has(status)) return res.status(400).json({ ok: false, error: 'invalid status' });
 
   const db = loadStore();
@@ -216,8 +257,15 @@ app.post('/api/worker/result', auth, (req, res) => {
   if (!task) return res.status(404).json({ ok: false, error: 'task not found' });
 
   task.status = status;
-  task.finishedAt = new Date().toISOString();
-  task.result = { workerId, status, output: output || {}, meta: meta || {} };
+  if (status === 'needs_input') {
+    task.needsInputAt = new Date().toISOString();
+    task.question = question || null;
+    task.options = Array.isArray(options) ? options : null;
+    task.result = { workerId, status, output: output || {}, meta: meta || {}, context: context || null };
+  } else {
+    task.finishedAt = new Date().toISOString();
+    task.result = { workerId, status, output: output || {}, meta: meta || {} };
+  }
   saveStore(db);
 
   res.json({ ok: true, taskId, status });
