@@ -157,9 +157,13 @@ const server = http.createServer((req, res) => {
         : result.status === "needs_input" ? 35 : 31;
       console.log(color(statusColor, `\n[orch] ← result: status=${result.status}`));
       if (result.meta?.question) {
-        console.log(color(35, `[orch]    question: ${result.meta.question}`));
-        console.log(color(35, `[orch]    options:  ${(result.meta.options || []).join(", ")}`));
-        console.log(color(35, `[orch]    context:  ${result.meta.context || ""}`));
+        console.log(color(35, `[orch]    meta.question: ${result.meta.question}`));
+        console.log(color(35, `[orch]    meta.options:  ${(result.meta.options || []).join(", ")}`));
+        console.log(color(35, `[orch]    meta.context:  ${result.meta.context || ""}`));
+      }
+      if (result.question !== undefined) {
+        console.log(color(35, `[orch]    top.question: ${result.question}`));
+        console.log(color(35, `[orch]    top.options:  ${(result.options || []).join(", ")}`));
       }
       if (result.output?.stdout) {
         console.log(color(37, `[orch]    stdout:   ${result.output.stdout.slice(0, 200)}`));
@@ -247,6 +251,41 @@ function finish() {
       statusSeq.includes("needs_input/claude") &&
       statusSeq.indexOf("needs_input/claude") < statusSeq.indexOf("completed/report"),
     detail: `sequence: ${statusSeq.join(" → ")}`,
+  });
+
+  // Check 9: top-level question in result body (regression for orchestrator compat)
+  checks.push({
+    name: "[regression] top-level question field in needs_input result body",
+    pass: r1 && r1.question === "Which config format should I use?",
+    detail: r1 ? `question="${r1.question}"` : "no result",
+  });
+
+  // Check 10: top-level options in result body
+  checks.push({
+    name: "[regression] top-level options field in needs_input result body",
+    pass: r1 && Array.isArray(r1.options) && r1.options.length === 3,
+    detail: r1 ? `options=${JSON.stringify(r1.options)}` : "no result",
+  });
+
+  // Check 11: needsInputAt present at top level
+  checks.push({
+    name: "[regression] top-level needsInputAt in needs_input result body",
+    pass: r1 && typeof r1.needsInputAt === "string",
+    detail: r1 ? `needsInputAt="${r1.needsInputAt}"` : "no result",
+  });
+
+  // Check 12: meta.question also preserved (backwards compat for Stage 1)
+  checks.push({
+    name: "[stage1-compat] meta.question still present",
+    pass: r1 && r1.meta?.question === "Which config format should I use?",
+    detail: r1 ? `meta.question="${r1.meta?.question}"` : "no result",
+  });
+
+  // Check 13: completed result has NO top-level question/options (not injected spuriously)
+  checks.push({
+    name: "[regression] completed result does not have spurious question field",
+    pass: r2 && r2.question === undefined,
+    detail: r2 ? `question=${JSON.stringify(r2.question)}` : "no result",
   });
 
   let allPass = true;

@@ -40,6 +40,7 @@ const CFG = {
   needsInputDebug:
     (process.env.NEEDS_INPUT_DEBUG || "false").toLowerCase() === "true",
   heartbeatIntervalMs: int("HEARTBEAT_INTERVAL_MS", 90000),
+  reviewMaxIterations: int("REVIEW_MAX_ITERATIONS", 3),
 };
 
 const STDOUT_LIMIT = 200 * 1024;
@@ -50,6 +51,7 @@ const ALLOWED_MODELS = new Set(["sonnet", "opus"]);
 const NEEDS_INPUT_RE = /\[NEEDS_INPUT\]([\s\S]*?)\[\/NEEDS_INPUT\]/;
 const REVIEW_PASS_RE = /\[REVIEW_PASS\]/i;
 const REVIEW_FAIL_RE = /\[REVIEW_FAIL(?:\s+severity=([^\]]+))?\]([\s\S]*?)\[\/REVIEW_FAIL\]/i;
+const REVIEW_FINDINGS_JSON_RE = /\[REVIEW_FINDINGS_JSON\]([\s\S]*?)\[\/REVIEW_FINDINGS_JSON\]/i;
 
 function required(key) {
   const v = process.env[key];
@@ -427,7 +429,8 @@ function parseReviewVerdict(stdout) {
   if (failMatch) {
     const severity = ((failMatch[1] || "major").trim()).toLowerCase();
     const findings = (failMatch[2] || "").trim().slice(0, 2000);
-    return { verdict: "fail", severity, findings };
+    const structuredFindings = parseStructuredFindings(stdout);
+    return { verdict: "fail", severity, findings, structuredFindings };
   }
 
   // No explicit verdict marker → conservative fail (review must explicitly pass)
@@ -435,6 +438,230 @@ function parseReviewVerdict(stdout) {
     verdict: "fail",
     severity: "unknown",
     findings: "No [REVIEW_PASS] or [REVIEW_FAIL] marker found in review output.",
+    structuredFindings: null,
+  };
+}
+
+// ── STRUCTURED FINDINGS PARSER ────────────────────────────────────────────────
+
+// Parses structured JSON findings from the [REVIEW_FINDINGS_JSON] block.
+// Schema per finding: { id, severity, file, issue, risk, required_fix, acceptance_check }
+function parseStructuredFindings(stdout) {
+  const text = extractClaudeResult(stdout) || stdout;
+  const m = text.match(REVIEW_FINDINGS_JSON_RE);
+  if (!m) return null;
+  try {
+    const arr = JSON.parse(m[1].trim());
+    if (!Array.isArray(arr) || arr.length === 0) return null;
+    const VALID_SEVERITIES = new Set(["critical", "major", "minor"]);
+    const normalized = arr
+      .filter((f) => f && typeof f === "object")
+      .map((f) => ({
+        id: String(f.id || ""),
+        severity: VALID_SEVERITIES.has(f.severity) ? f.severity : "major",
+        file: String(f.file || ""),
+        issue: String(f.issue || ""),
+        risk: String(f.risk || ""),
+        required_fix: String(f.required_fix || ""),
+        acceptance_check: String(f.acceptance_check || ""),
+      }))
+      .filter((f) => f.issue);
+    return normalized.length ? normalized : null;
+  } catch {
+    return null;
+  }
+}
+
+// Serialize findings for injection into the next patch prompt.
+// Prefers structured JSON so patch Claude can parse each finding precisely.
+function serializeFindings(rv, sf) {
+  if (sf && sf.length > 0) {
+    return JSON.stringify(sf, null, 2);
+  }
+  return (rv.findings || "No findings available.").slice(0, 2000);
+}
+
+// ── REVIEW LOOP HELPERS ───────────────────────────────────────────────────────
+
+// Build an internal patch task derived from the review task's scope/context.
+function buildPatchTask(reviewTask, findingsText, iteration) {
+  const patchInstructions = reviewTask.patchInstructions
+    || (reviewTask.instructions
+      ? `Fix all issues identified in the review findings below. Original task context:\n${reviewTask.instructions}`
+      : "Fix all issues identified in the review findings. Address every finding completely.");
+  return {
+    taskId: `${reviewTask.taskId}-patch-iter${iteration}`,
+    mode: "implement",
+    scope: reviewTask.scope,
+    model: reviewTask.model,
+    instructions: patchInstructions,
+    constraints: reviewTask.constraints,
+    contextSnippets: reviewTask.contextSnippets,
+    previousReviewFindings: findingsText,
+  };
+}
+
+// Get git diff for token-optimized review context.
+function getGitDiff(repoPath) {
+  return new Promise((resolve) => {
+    const child = spawn("git", ["diff", "HEAD"], {
+      cwd: repoPath,
+      shell: false,
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 10000,
+    });
+    let out = "";
+    child.stdout.on("data", (c) => { if (out.length < 50000) out += c; });
+    child.on("close", () => resolve(out.trim() || null));
+    child.on("error", () => resolve(null));
+  });
+}
+
+// Build a re-review task with token-optimized context (diff + iteration marker).
+// The iteration marker lets the mock (and real) Claude distinguish re-reviews.
+async function buildReviewTaskWithDiff(task, iteration) {
+  const repoPath = path.resolve(task.scope.repoPath);
+  const diff = await getGitDiff(repoPath).catch(() => null);
+  const snippetContent = diff
+    ? `Git diff (patch applied):\n${diff.slice(0, 10000)}`
+    : `Re-review after patch (iteration ${iteration}). Focus on whether previously identified issues have been resolved.`;
+  const diffSnippet = {
+    label: `review-loop-context (iter ${iteration})`,
+    content: snippetContent,
+  };
+  return {
+    ...task,
+    contextSnippets: [...(task.contextSnippets || []), diffSnippet],
+  };
+}
+
+// ── REVIEW LOOP ───────────────────────────────────────────────────────────────
+
+// Runs the full review-patch-review loop for a task with reviewLoop:true.
+// Returns a result object compatible with mainLoop expectations.
+async function runReviewLoop(task, stepCtx) {
+  const maxIter = Math.max(1, Math.min(task.maxReviewIterations || CFG.reviewMaxIterations, 10));
+  const loopStart = Date.now();
+  let currentFindings = null;
+  let currentSF = null;
+  let lastOutput = { stdout: "", stderr: "", truncated: false };
+  let lastMeta = { repoPath: path.resolve(task.scope.repoPath), branch: task.scope.branch, model: task.model || CFG.claudeModel };
+
+  log("info", "review_loop started", { taskId: task.taskId, maxIter });
+
+  for (let iter = 1; iter <= maxIter; iter++) {
+
+    // ── PATCH (iterations 2+: patch before re-review) ──
+    if (currentFindings !== null) {
+      const patchTask = buildPatchTask(task, currentFindings, iter);
+      await sendEvent(task, "progress", "review_loop",
+        `patch run (iteration ${iter}/${maxIter})`,
+        { phase: "patch", iteration: iter, maxIter }
+      );
+      log("info", "review_loop: patch run", { taskId: task.taskId, iter, patchTaskId: patchTask.taskId });
+      const patchResult = await executeTask(patchTask, stepCtx);
+      lastOutput = patchResult.output;
+      lastMeta = patchResult.meta;
+
+      if (patchResult.status !== "completed") {
+        log("warn", "review_loop: patch run did not complete", { taskId: task.taskId, iter, status: patchResult.status });
+        return {
+          status: "escalated",
+          output: patchResult.output,
+          meta: {
+            ...patchResult.meta,
+            reviewIteration: iter,
+            reviewMaxIterations: maxIter,
+            reviewFindings: currentFindings,
+            structuredFindings: currentSF,
+            escalationReason: `patch run ${patchResult.status} at iteration ${iter}`,
+            reviewLoopDurationMs: Date.now() - loopStart,
+          },
+        };
+      }
+    }
+
+    // ── REVIEW (fresh context, with diff on re-reviews) ──
+    const reviewTask = iter > 1
+      ? await buildReviewTaskWithDiff(task, iter)
+      : task;
+    await sendEvent(task, "progress", "review_loop",
+      `review run (iteration ${iter}/${maxIter})`,
+      { phase: "review", iteration: iter, maxIter }
+    );
+    log("info", "review_loop: review run", { taskId: task.taskId, iter });
+    const reviewResult = await executeTask(reviewTask, stepCtx);
+    lastOutput = reviewResult.output;
+    lastMeta = reviewResult.meta;
+
+    const rv = parseReviewVerdict(reviewResult.output.stdout);
+    const sf = parseStructuredFindings(reviewResult.output.stdout);
+
+    if (rv.verdict === "pass") {
+      log("info", "review_loop: passed", { taskId: task.taskId, iter });
+      return {
+        status: "review_pass",
+        output: reviewResult.output,
+        meta: {
+          ...reviewResult.meta,
+          reviewVerdict: "pass",
+          reviewIteration: iter,
+          reviewMaxIterations: maxIter,
+          reviewLoopDurationMs: Date.now() - loopStart,
+        },
+      };
+    }
+
+    // Review failed this iteration
+    currentFindings = serializeFindings(rv, sf);
+    currentSF = sf;
+
+    if (iter >= maxIter) {
+      // Max iterations exhausted → escalate
+      log("warn", "review_loop: max iterations reached", { taskId: task.taskId, iter, maxIter });
+      return {
+        status: "escalated",
+        output: reviewResult.output,
+        meta: {
+          ...reviewResult.meta,
+          reviewVerdict: "fail",
+          reviewSeverity: rv.severity,
+          reviewFindings: rv.findings,
+          structuredFindings: sf,
+          reviewIteration: iter,
+          reviewMaxIterations: maxIter,
+          escalationReason: `max review iterations (${maxIter}) reached without passing`,
+          reviewLoopDurationMs: Date.now() - loopStart,
+        },
+      };
+    }
+
+    // Emit intermediate fail event — loop will continue with a patch
+    await sendEvent(task, "review_loop_fail", "report",
+      `review failed (iter ${iter}/${maxIter}), severity=${rv.severity}`,
+      {
+        reviewVerdict: "fail",
+        reviewSeverity: rv.severity,
+        reviewFindings: (rv.findings || "").slice(0, 500),
+        structuredFindings: sf,
+        iteration: iter,
+        maxIter,
+      }
+    );
+    log("info", "review_loop: iteration failed, will patch", { taskId: task.taskId, iter, severity: rv.severity });
+  }
+
+  // Safety fallback (should not be reached)
+  return {
+    status: "escalated",
+    output: lastOutput,
+    meta: {
+      ...lastMeta,
+      reviewIteration: maxIter,
+      reviewMaxIterations: maxIter,
+      escalationReason: "loop exited unexpectedly",
+      reviewLoopDurationMs: Date.now() - loopStart,
+    },
   };
 }
 
@@ -446,6 +673,15 @@ function buildPlan(task) {
     return ["validate", "report"];
   }
   const branch = task.scope?.branch || "branch";
+  if (task.reviewLoop && task.mode === "review") {
+    const maxIter = task.maxReviewIterations || CFG.reviewMaxIterations;
+    return [
+      "validate",
+      `checkout ${branch}`,
+      `review_loop (max ${maxIter} iterations, model: ${model})`,
+      "report",
+    ];
+  }
   return [
     "validate",
     `checkout ${branch}`,
@@ -781,7 +1017,9 @@ async function mainLoop() {
       });
 
       // ── EXECUTE ──
-      const result = await executeTask(task, { gitStep, claudeStep, stepTotal });
+      const result = (task.reviewLoop && task.mode === "review")
+        ? await runReviewLoop(task, { gitStep, claudeStep, stepTotal })
+        : await executeTask(task, { gitStep, claudeStep, stepTotal });
 
       // ── NEEDS_INPUT CHECK ──
       let ni = null;
@@ -829,7 +1067,8 @@ async function mainLoop() {
 
       // ── REVIEW GATE ──
       // For review mode, completed is never valid — must be review_pass or review_fail.
-      if (task.mode === "review" && result.status === "completed") {
+      // reviewLoop tasks have already been handled by runReviewLoop above.
+      if (task.mode === "review" && !task.reviewLoop && result.status === "completed") {
         const rv = parseReviewVerdict(result.output.stdout);
         result.meta.reviewVerdict = rv.verdict;
         if (rv.verdict === "pass") {
@@ -838,6 +1077,7 @@ async function mainLoop() {
           result.status = "review_fail";
           result.meta.reviewSeverity = rv.severity;
           result.meta.reviewFindings = rv.findings;
+          result.meta.structuredFindings = rv.structuredFindings || null;
         }
         log("info", "review verdict parsed", {
           taskId: task.taskId,
@@ -846,9 +1086,9 @@ async function mainLoop() {
         });
       }
 
-      // Hard safety gate: if review mode still shows completed (should never happen),
+      // Hard safety gate: if review mode (non-loop) still shows completed (should never happen),
       // force review_fail. Completion is impossible without an explicit REVIEW_PASS marker.
-      if (task.mode === "review" && result.status === "completed") {
+      if (task.mode === "review" && !task.reviewLoop && result.status === "completed") {
         log("error", "review-gate violation: completed status blocked for review mode", {
           taskId: task.taskId,
         });
@@ -871,11 +1111,22 @@ async function mainLoop() {
           result.meta
         );
       } else if (result.status === "review_pass") {
-        await sendEvent(task, "review_pass", "report", "review passed", result.meta);
+        const iterInfo = result.meta.reviewIteration
+          ? ` (iter ${result.meta.reviewIteration}/${result.meta.reviewMaxIterations})`
+          : "";
+        await sendEvent(task, "review_pass", "report", `review passed${iterInfo}`, result.meta);
       } else if (result.status === "review_fail") {
         const sev = result.meta.reviewSeverity || "unknown";
         const summary = (result.meta.reviewFindings || "").slice(0, 200);
         await sendEvent(task, "review_fail", "report", `review failed (${sev}): ${summary}`, result.meta);
+      } else if (result.status === "escalated") {
+        const iter = result.meta.reviewIteration || "?";
+        const maxIter = result.meta.reviewMaxIterations || "?";
+        const reason = result.meta.escalationReason || "max iterations reached";
+        await sendEvent(task, "escalated", "report",
+          `review loop escalated after ${iter}/${maxIter} iterations: ${reason}`,
+          result.meta
+        );
       } else if (result.status === "completed") {
         await sendEvent(task, "completed", "report", "task completed", result.meta);
       } else if (result.status === "timeout") {
@@ -889,14 +1140,30 @@ async function mainLoop() {
         stepIndex: stepTotal,
         stepTotal,
       });
-      await apiPost("/api/worker/result", {
+      const resultBody = {
         workerId: CFG.workerId,
         taskId: task.taskId,
         status: result.status,
         mode: task.mode,
         output: result.output,
         meta: result.meta,
-      });
+      };
+      // For needs_input: hoist question/options/context to top-level so the
+      // orchestrator can store them directly on task.question / task.options
+      // without having to dig into meta. meta fields are preserved for compat.
+      if (result.status === "needs_input") {
+        resultBody.question = result.meta.question ?? null;
+        resultBody.options = result.meta.options ?? null;
+        resultBody.context = result.meta.context ?? null;
+        resultBody.needsInputAt = result.meta.needsInputAt ?? null;
+      }
+      // For review_fail and escalated: hoist structuredFindings to top-level so the
+      // orchestrator can pass them directly to the next patch task.
+      if (result.status === "review_fail" || result.status === "escalated") {
+        resultBody.structuredFindings = result.meta?.structuredFindings ?? null;
+        resultBody.reviewFindings = result.meta?.reviewFindings ?? null;
+      }
+      await apiPost("/api/worker/result", resultBody);
 
       resetBackoff();
     } catch (err) {

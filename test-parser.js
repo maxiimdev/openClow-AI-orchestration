@@ -516,6 +516,45 @@ test("parseNeedsInput falls through to AskUserQuestion (no marker in result text
   assertEq(ni.options, ["TypeScript — Type-safe", "JavaScript — No build step"]);
 });
 
+test("parseNeedsInput — question always non-null on match (never returns null question)", () => {
+  // Ensure normalizePayload fallback works
+  const stdout = JSON.stringify({
+    type: "result",
+    result: "[NEEDS_INPUT]\nno question key here\n[/NEEDS_INPUT]",
+  });
+  const ni = parseNeedsInput(stdout);
+  assert(ni !== null);
+  assert(typeof ni.question === "string" && ni.question.length > 0, "question must be non-empty string");
+  assertEq(ni.question, "Clarification required", "fallback question text");
+});
+
+test("parseNeedsInput — options null when not specified (never empty array)", () => {
+  const stdout = JSON.stringify({
+    type: "result",
+    result: "[NEEDS_INPUT]\nquestion: Should I proceed?\n[/NEEDS_INPUT]",
+  });
+  const ni = parseNeedsInput(stdout);
+  assert(ni !== null);
+  assertEq(ni.options, null, "options must be null not empty array");
+});
+
+test("parseNeedsInput — stage2 review output does not trigger false positive", () => {
+  // Regression: review mode output with [REVIEW_PASS] should NOT trigger needs_input
+  const stdout = JSON.stringify({
+    type: "result",
+    result: "I reviewed the code thoroughly.\n[REVIEW_PASS]\nAll checks passed, no issues found.",
+  });
+  assertEq(parseNeedsInput(stdout), null, "review output should not trigger needs_input");
+});
+
+test("parseNeedsInput — review fail output does not trigger false positive", () => {
+  const stdout = JSON.stringify({
+    type: "result",
+    result: "[REVIEW_FAIL severity=major]\nSQL injection in login endpoint.\n[/REVIEW_FAIL]",
+  });
+  assertEq(parseNeedsInput(stdout), null, "review_fail output should not trigger needs_input");
+});
+
 test("strict marker takes priority over AskUserQuestion", () => {
   const stdout = JSON.stringify({
     type: "result",

@@ -53,6 +53,10 @@ The server should add its own `serverTs` timestamp on receipt.
 | `progress` | Intermediate step in progress |
 | `needs_input` | Claude asked a question; waiting for user answer |
 | `resumed` | User answered; task re-queued (written by orch-api, not worker) |
+| `review_pass` | `review` mode: review passed |
+| `review_fail` | `review` mode (single-shot): review failed |
+| `review_loop_fail` | `review` mode with `reviewLoop:true`: an intermediate review iteration failed; loop will continue with a patch |
+| `escalated` | `review` mode with `reviewLoop:true`: max iterations exhausted without passing |
 | `completed` | Task finished successfully |
 | `failed` | Task failed (non-zero exit, spawn error, or JS exception) |
 | `timeout` | Claude CLI exceeded `CLAUDE_TIMEOUT_MS` |
@@ -64,8 +68,10 @@ The server should add its own `serverTs` timestamp on receipt.
 |---|---|
 | `pull` | Task pulled from queue |
 | `validate` | Task validation |
+| `plan` | Execution plan built |
 | `git` | Git checkout operation |
 | `claude` | Claude CLI execution |
+| `review_loop` | Review-patch-review loop coordination (Stage 2.2) |
 | `push` | Git push (reserved, not currently used) |
 | `pr` | PR creation (reserved, not currently used) |
 | `report` | Final result reporting |
@@ -82,15 +88,70 @@ Every event the worker sends, in order of occurrence:
 | Task received from pull | `claimed` | `pull` | `"task received"` |
 | Task resumed with answer | `progress` | `report` | `"task resumed with user input"` |
 | Before validation | `started` | `validate` | `"validating task"` |
+| Plan built | `progress` | `plan` | `"steps: validate → checkout → spawn claude → report"` |
+| Validation passed | `progress` | `validate` | `"validation passed"` |
 | Validation failed | `rejected` | `validate` | Validation error details |
 | Before git checkout | `progress` | `git` | `"checking out branch <branch>"` |
-| Before spawning Claude | `progress` | `claude` | `"spawning claude CLI"` |
+| Before spawning Claude | `progress` | `claude` | `"spawning claude (model: <m>)"` |
+| Heartbeat (no activity 90s) | `keepalive` | `claude` | `"still running (<N>s elapsed)"` |
+| Near timeout (80%) | `risk` | `claude` | `"near timeout: <N>s/<M>s elapsed"` |
+| Claude non-zero exit | `risk` | `claude` | `"claude exited with code <N>"` |
 | Claude needs input | `needs_input` | `claude` | `"needs input: <question>"` |
+| Review passed | `review_pass` | `report` | `"review passed"` |
+| Review failed (single-shot) | `review_fail` | `report` | `"review failed (<sev>): <summary>"` |
+| Review loop: starting review/patch step | `progress` | `review_loop` | `"review run (iteration N/M)"` or `"patch run (iteration N/M)"` |
+| Review loop: intermediate iteration failed | `review_loop_fail` | `report` | `"review failed (iter N/M), severity=<sev>"` |
+| Review loop: max iterations exhausted | `escalated` | `report` | `"review loop escalated after N/M iterations: <reason>"` |
 | Claude completed | `completed` | `report` | `"task completed"` |
 | Claude failed | `failed` | `report` | `"task failed"` |
 | Claude timed out | `timeout` | `claude` | `"claude process timed out"` |
 | JS exception in loop | `failed` | `other` | Error message |
+| Final result reporting | `progress` | `report` | `"reporting result"` |
 | User answered (orch-api) | `resumed` | `report` | `"resumed by <who>: <answer>"` |
+
+### Review Loop Event Sequence
+
+For a `reviewLoop: true` task that fails on iteration 1 and passes on iteration 2:
+
+```
+claimed/pull
+started/validate
+progress/plan
+progress/validate
+progress/review_loop  → "review run (iteration 1/3)"
+  progress/git
+  progress/claude
+review_loop_fail/report  → carries meta.structuredFindings
+progress/review_loop  → "patch run (iteration 2/3)"
+  progress/git
+  progress/claude
+progress/review_loop  → "review run (iteration 2/3)"
+  progress/git
+  progress/claude
+review_pass/report  → carries meta.reviewIteration=2
+progress/report
+```
+
+For a `reviewLoop: true` task that exhausts `maxReviewIterations: 2`:
+
+```
+claimed/pull
+started/validate
+progress/plan
+progress/validate
+progress/review_loop  → "review run (iteration 1/2)"
+  progress/git
+  progress/claude
+review_loop_fail/report
+progress/review_loop  → "patch run (iteration 2/2)"
+  progress/git
+  progress/claude
+progress/review_loop  → "review run (iteration 2/2)"
+  progress/git
+  progress/claude
+escalated/report  → carries meta.escalationReason, meta.structuredFindings
+progress/report
+```
 
 ---
 
