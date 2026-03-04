@@ -39,6 +39,7 @@ const CFG = {
   claudeModel: process.env.CLAUDE_MODEL || "sonnet",
   needsInputDebug:
     (process.env.NEEDS_INPUT_DEBUG || "false").toLowerCase() === "true",
+  heartbeatIntervalMs: int("HEARTBEAT_INTERVAL_MS", 90000),
 };
 
 const STDOUT_LIMIT = 200 * 1024;
@@ -437,10 +438,27 @@ function parseReviewVerdict(stdout) {
   };
 }
 
+// ── PLAN BUILDER ──────────────────────────────────────────────────────────────
+
+function buildPlan(task) {
+  const model = task.model || CFG.claudeModel;
+  if (task.mode === "dry_run") {
+    return ["validate", "report"];
+  }
+  const branch = task.scope?.branch || "branch";
+  return [
+    "validate",
+    `checkout ${branch}`,
+    `spawn claude (${model})`,
+    "report",
+  ];
+}
+
 // ── EXECUTE ────────────────────────────────────────────────────────────────────
 
-async function executeTask(task) {
+async function executeTask(task, stepCtx) {
   const start = Date.now();
+  const { gitStep = 2, claudeStep = 3, stepTotal = 4 } = stepCtx || {};
 
   const model = task.model || CFG.claudeModel;
 
@@ -467,10 +485,20 @@ async function executeTask(task) {
   const repoPath = path.resolve(task.scope.repoPath);
 
   // checkout branch
-  await sendEvent(task, "progress", "git", `checking out branch ${task.scope.branch}`);
+  await sendEvent(task, "progress", "git", `checking out branch ${task.scope.branch}`, {
+    stepIndex: gitStep,
+    stepTotal,
+    path: repoPath,
+    branch: task.scope.branch,
+  });
   await gitCheckout(repoPath, task.scope.branch);
 
-  await sendEvent(task, "progress", "claude", `spawning claude CLI (model: ${model})`, { model });
+  await sendEvent(task, "progress", "claude", `spawning claude (model: ${model})`, {
+    stepIndex: claudeStep,
+    stepTotal,
+    model,
+    command: CFG.claudeCmd,
+  });
 
   return new Promise((resolve) => {
     const args = [
@@ -503,13 +531,46 @@ async function executeTask(task) {
     let stderr = "";
     let timedOut = false;
 
+    // Heartbeat: fire keepalive if no stdout/stderr for >heartbeatIntervalMs
+    let heartbeatTimer = null;
+    const scheduleHeartbeat = () => {
+      clearTimeout(heartbeatTimer);
+      heartbeatTimer = setTimeout(() => {
+        const elapsedMs = Date.now() - start;
+        sendEvent(
+          task,
+          "keepalive",
+          "claude",
+          `still running (${Math.round(elapsedMs / 1000)}s elapsed, step ${claudeStep}/${stepTotal})`,
+          { elapsedMs, stepIndex: claudeStep, stepTotal }
+        );
+        scheduleHeartbeat(); // reschedule
+      }, CFG.heartbeatIntervalMs);
+    };
+    scheduleHeartbeat();
+
+    // Near-timeout risk event at 80% of the timeout threshold
+    const nearTimeoutMs = Math.floor(CFG.claudeTimeoutMs * 0.8);
+    const nearTimeoutTimer = setTimeout(() => {
+      const elapsedMs = Date.now() - start;
+      sendEvent(
+        task,
+        "risk",
+        "claude",
+        `near timeout: ${Math.round(elapsedMs / 1000)}s/${Math.round(CFG.claudeTimeoutMs / 1000)}s elapsed`,
+        { elapsedMs, timeoutMs: CFG.claudeTimeoutMs, riskType: "near_timeout", stepIndex: claudeStep, stepTotal }
+      );
+    }, nearTimeoutMs);
+
     child.stdout.on("data", (chunk) => {
+      scheduleHeartbeat(); // reset heartbeat countdown on activity
       if (Buffer.byteLength(stdout, "utf-8") < STDOUT_LIMIT) {
         stdout += chunk.toString();
       }
     });
 
     child.stderr.on("data", (chunk) => {
+      scheduleHeartbeat(); // reset heartbeat countdown on activity
       if (Buffer.byteLength(stderr, "utf-8") < STDERR_LIMIT) {
         stderr += chunk.toString();
       }
@@ -517,7 +578,12 @@ async function executeTask(task) {
 
     const timer = setTimeout(() => {
       timedOut = true;
-      sendEvent(task, "timeout", "claude", "claude process timed out");
+      sendEvent(task, "timeout", "claude", "claude process timed out", {
+        stepIndex: claudeStep,
+        stepTotal,
+        timeoutMs: CFG.claudeTimeoutMs,
+        elapsedMs: Date.now() - start,
+      });
       log("warn", "timeout, sending SIGTERM", { taskId: task.taskId, pid });
       child.kill("SIGTERM");
       setTimeout(() => {
@@ -528,6 +594,8 @@ async function executeTask(task) {
 
     child.on("close", (code) => {
       clearTimeout(timer);
+      clearTimeout(heartbeatTimer);
+      clearTimeout(nearTimeoutTimer);
       const durationMs = Date.now() - start;
       const outTrunc = truncate(stdout, STDOUT_LIMIT);
       const errTrunc = truncate(stderr, STDERR_LIMIT);
@@ -541,6 +609,17 @@ async function executeTask(task) {
         durationMs,
         pid,
       });
+
+      // Risk event for non-zero exit
+      if (!timedOut && code !== 0) {
+        sendEvent(task, "risk", "claude", `claude exited with code ${code}`, {
+          exitCode: code,
+          riskType: "exit_failure",
+          durationMs,
+          stepIndex: claudeStep,
+          stepTotal,
+        });
+      }
 
       resolve({
         status,
@@ -563,6 +642,8 @@ async function executeTask(task) {
 
     child.on("error", (err) => {
       clearTimeout(timer);
+      clearTimeout(heartbeatTimer);
+      clearTimeout(nearTimeoutTimer);
       log("error", "spawn error", {
         taskId: task.taskId,
         err: err.message,
@@ -684,8 +765,23 @@ async function mainLoop() {
         continue;
       }
 
+      // ── PLAN + STEP TELEMETRY ──
+      const plan = buildPlan(task);
+      const stepTotal = plan.length;
+      const gitStep = (plan.findIndex((s) => s.startsWith("checkout")) + 1) || 2;
+      const claudeStep = (plan.findIndex((s) => s.startsWith("spawn claude")) + 1) || 3;
+      await sendEvent(task, "progress", "plan", `steps: ${plan.join(" → ")}`, {
+        stepIndex: 0,
+        stepTotal,
+        steps: plan,
+      });
+      await sendEvent(task, "progress", "validate", "validation passed", {
+        stepIndex: 1,
+        stepTotal,
+      });
+
       // ── EXECUTE ──
-      const result = await executeTask(task);
+      const result = await executeTask(task, { gitStep, claudeStep, stepTotal });
 
       // ── NEEDS_INPUT CHECK ──
       let ni = null;
@@ -789,6 +885,10 @@ async function mainLoop() {
       }
 
       // ── REPORT ──
+      await sendEvent(task, "progress", "report", "reporting result", {
+        stepIndex: stepTotal,
+        stepTotal,
+      });
       await apiPost("/api/worker/result", {
         workerId: CFG.workerId,
         taskId: task.taskId,
