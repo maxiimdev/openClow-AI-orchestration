@@ -77,12 +77,35 @@ Output: JSONL or JSON with a `result` string field. Exit 0 = success, non-zero =
 6. Worker checks out branch (progress/git)
 7. Worker spawns Claude CLI (progress/claude)
 8. Claude runs...
-   ├─ exit 0 + no needs_input → completed/report → result(completed)
+   ├─ exit 0 + no needs_input (mode != review) → completed/report → result(completed)
    ├─ exit 0 + needs_input detected → needs_input/claude → result(needs_input)
    │     └─ User answers → POST /api/task/resume → re-queued → step 3
+   ├─ exit 0 + mode=review + [REVIEW_PASS] → review_pass/report → result(review_pass)
+   ├─ exit 0 + mode=review + [REVIEW_FAIL] or no marker → review_fail/report → result(review_fail)
    ├─ exit non-zero → failed/report → result(failed)
    └─ timeout → timeout/claude → result(timeout)
 ```
+
+## Stage 2: Review Gate
+
+The review gate is enforced in the worker. For tasks with `mode=review`:
+
+1. Claude output is parsed for `[REVIEW_PASS]` or `[REVIEW_FAIL severity=major|critical]...[/REVIEW_FAIL]` markers.
+2. `[REVIEW_PASS]` → status becomes `review_pass`; orchestrator may proceed to `tests`.
+3. `[REVIEW_FAIL]` or no marker → status becomes `review_fail`; orchestrator re-queues an `implement` (patch) task with `previousReviewFindings`.
+4. **The `completed` status is physically impossible for `mode=review` tasks** — the gate is enforced in code with a double-check (normal path + hard safety gate).
+
+### Stage 2 Flow
+
+```
+implement → review (fresh run)
+               ├─ review_pass → tests → completed
+               └─ review_fail → implement (patch, previousReviewFindings injected) → review → ...
+```
+
+### Patch Loop Prompt Injection
+
+When a task has `task.previousReviewFindings` set, the worker injects a `## Review Findings` section into the prompt so Claude can address the issues directly.
 
 ## Task State Storage
 
@@ -91,7 +114,7 @@ All state lives in the orchestrator. The task object includes:
 | Field | Description |
 |---|---|
 | `taskId` | Unique identifier |
-| `status` | `queued`, `needs_input`, `completed`, `failed`, `timeout`, `rejected` |
+| `status` | `queued`, `needs_input`, `completed`, `review_pass`, `review_fail`, `failed`, `timeout`, `rejected` |
 | `mode` | `dry_run`, `implement`, `review`, `tests` |
 | `scope` | `{ repoPath, branch }` |
 | `instructions` | Task prompt text |

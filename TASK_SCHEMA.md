@@ -67,6 +67,7 @@ Fields the orchestrator must supply when returning a task from `/api/worker/pull
 | `instructions` | string | Task prompt body |
 | `constraints` | string[] | Constraint lines injected into the prompt |
 | `contextSnippets` | object[] | Code/text snippets — see [Context Snippets](#context-snippets) |
+| `previousReviewFindings` | string | Findings from a failed review (patch loop). Injected as `## Review Findings` in the prompt. |
 
 ### Resume Fields
 
@@ -223,11 +224,29 @@ Content-Type: application/json
 
 | Status | Meaning |
 |---|---|
-| `completed` | Claude exited 0, no `needs_input` detected |
+| `completed` | Claude exited 0, no `needs_input` detected (not valid for `review` mode) |
 | `needs_input` | Claude exited 0, `needs_input` detected in output |
+| `review_pass` | `review` mode: Claude output contained `[REVIEW_PASS]` marker |
+| `review_fail` | `review` mode: Claude output contained `[REVIEW_FAIL]` marker, or no verdict marker found |
 | `failed` | Claude exited non-zero, or spawn error |
 | `timeout` | Claude exceeded `CLAUDE_TIMEOUT_MS` |
 | `rejected` | Task failed validation |
+
+**Review gate enforcement**: For `mode=review`, the worker never emits `completed`. It always parses the verdict and emits `review_pass` or `review_fail`. A hard safety gate (second check) ensures this even if the normal path is bypassed.
+
+### Additional `meta` fields for `review_fail`
+
+| Field | Type | Description |
+|---|---|---|
+| `meta.reviewVerdict` | string | `"fail"` |
+| `meta.reviewSeverity` | string | Severity from `[REVIEW_FAIL severity=...]`, e.g. `"major"`, `"critical"`, `"unknown"` |
+| `meta.reviewFindings` | string | Findings body from inside `[REVIEW_FAIL]...[/REVIEW_FAIL]` (max 2000 chars) |
+
+### Additional `meta` fields for `review_pass`
+
+| Field | Type | Description |
+|---|---|---|
+| `meta.reviewVerdict` | string | `"pass"` |
 
 ### Response
 

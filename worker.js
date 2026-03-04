@@ -47,6 +47,8 @@ const BRANCH_RE = /^(agent|hotfix|feature|bugfix)\/[a-zA-Z0-9._-]+$/;
 const BLOCKED_BRANCHES = new Set(["main", "master"]);
 const ALLOWED_MODELS = new Set(["sonnet", "opus"]);
 const NEEDS_INPUT_RE = /\[NEEDS_INPUT\]([\s\S]*?)\[\/NEEDS_INPUT\]/;
+const REVIEW_PASS_RE = /\[REVIEW_PASS\]/i;
+const REVIEW_FAIL_RE = /\[REVIEW_FAIL(?:\s+severity=([^\]]+))?\]([\s\S]*?)\[\/REVIEW_FAIL\]/i;
 
 function required(key) {
   const v = process.env[key];
@@ -203,6 +205,13 @@ function buildPrompt(task) {
     parts.push(
       `\nContinue the task using the answer above. Pick up where you left off.`
     );
+  }
+
+  // Patch loop: inject previous review findings so Claude can address them
+  if (task.previousReviewFindings) {
+    parts.push(`\n## Review Findings`);
+    parts.push(`The previous review identified the following issues that must be addressed:`);
+    parts.push(task.previousReviewFindings);
   }
 
   return parts.join("\n");
@@ -402,6 +411,30 @@ function _normalizeAuqOptions(options) {
     }
     return String(o);
   }).filter(Boolean);
+}
+
+// ── REVIEW VERDICT PARSER ─────────────────────────────────────────────────────
+
+function parseReviewVerdict(stdout) {
+  const text = extractClaudeResult(stdout) || stdout;
+
+  if (REVIEW_PASS_RE.test(text)) {
+    return { verdict: "pass" };
+  }
+
+  const failMatch = text.match(REVIEW_FAIL_RE);
+  if (failMatch) {
+    const severity = ((failMatch[1] || "major").trim()).toLowerCase();
+    const findings = (failMatch[2] || "").trim().slice(0, 2000);
+    return { verdict: "fail", severity, findings };
+  }
+
+  // No explicit verdict marker → conservative fail (review must explicitly pass)
+  return {
+    verdict: "fail",
+    severity: "unknown",
+    findings: "No [REVIEW_PASS] or [REVIEW_FAIL] marker found in review output.",
+  };
 }
 
 // ── EXECUTE ────────────────────────────────────────────────────────────────────
@@ -698,6 +731,37 @@ async function mainLoop() {
         result.status = "needs_input";
       }
 
+      // ── REVIEW GATE ──
+      // For review mode, completed is never valid — must be review_pass or review_fail.
+      if (task.mode === "review" && result.status === "completed") {
+        const rv = parseReviewVerdict(result.output.stdout);
+        result.meta.reviewVerdict = rv.verdict;
+        if (rv.verdict === "pass") {
+          result.status = "review_pass";
+        } else {
+          result.status = "review_fail";
+          result.meta.reviewSeverity = rv.severity;
+          result.meta.reviewFindings = rv.findings;
+        }
+        log("info", "review verdict parsed", {
+          taskId: task.taskId,
+          verdict: rv.verdict,
+          severity: rv.severity || null,
+        });
+      }
+
+      // Hard safety gate: if review mode still shows completed (should never happen),
+      // force review_fail. Completion is impossible without an explicit REVIEW_PASS marker.
+      if (task.mode === "review" && result.status === "completed") {
+        log("error", "review-gate violation: completed status blocked for review mode", {
+          taskId: task.taskId,
+        });
+        result.status = "review_fail";
+        result.meta.reviewVerdict = "fail";
+        result.meta.reviewSeverity = "unknown";
+        result.meta.reviewFindings = "Review gate enforced: completed status not allowed for review mode tasks.";
+      }
+
       log("info", "task done", {
         taskId: task.taskId,
         status: result.status,
@@ -710,6 +774,12 @@ async function mainLoop() {
           `needs input: ${result.meta.question || "(no question)"}`,
           result.meta
         );
+      } else if (result.status === "review_pass") {
+        await sendEvent(task, "review_pass", "report", "review passed", result.meta);
+      } else if (result.status === "review_fail") {
+        const sev = result.meta.reviewSeverity || "unknown";
+        const summary = (result.meta.reviewFindings || "").slice(0, 200);
+        await sendEvent(task, "review_fail", "report", `review failed (${sev}): ${summary}`, result.meta);
       } else if (result.status === "completed") {
         await sendEvent(task, "completed", "report", "task completed", result.meta);
       } else if (result.status === "timeout") {
