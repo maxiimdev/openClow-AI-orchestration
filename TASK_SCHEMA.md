@@ -67,7 +67,17 @@ Fields the orchestrator must supply when returning a task from `/api/worker/pull
 | `instructions` | string | Task prompt body |
 | `constraints` | string[] | Constraint lines injected into the prompt |
 | `contextSnippets` | object[] | Code/text snippets — see [Context Snippets](#context-snippets) |
-| `previousReviewFindings` | string | Findings from a failed review (patch loop). Injected as `## Review Findings` in the prompt. |
+| `previousReviewFindings` | string | Findings from a failed review (patch loop). Injected as `## Review Findings` in the prompt. May be structured JSON (from `[REVIEW_FINDINGS_JSON]` block) or plain text. |
+
+### Review Loop Fields (Stage 2.2)
+
+Set these on a `mode: "review"` task to enable the internal review-patch-review loop.
+
+| Field | Type | Description |
+|---|---|---|
+| `reviewLoop` | boolean | If `true`, the worker handles the full review loop internally (default: `false` — single-shot review) |
+| `maxReviewIterations` | number | Max review runs before escalation (default: `REVIEW_MAX_ITERATIONS` env, default `3`). Clamped to 1–10. |
+| `patchInstructions` | string | Instructions for the internal patch run. Defaults to fixing all identified issues using the original `instructions` as context. |
 
 ### Resume Fields
 
@@ -238,26 +248,128 @@ When `status` is `needs_input`, the worker also adds these fields at the top lev
 | `completed` | Claude exited 0, no `needs_input` detected (not valid for `review` mode) |
 | `needs_input` | Claude exited 0, `needs_input` detected in output |
 | `review_pass` | `review` mode: Claude output contained `[REVIEW_PASS]` marker |
-| `review_fail` | `review` mode: Claude output contained `[REVIEW_FAIL]` marker, or no verdict marker found |
+| `review_fail` | `review` mode (single-shot): Claude output contained `[REVIEW_FAIL]` marker, or no verdict marker found |
+| `escalated` | `review` mode with `reviewLoop: true`: max iterations reached without passing |
 | `failed` | Claude exited non-zero, or spawn error |
 | `timeout` | Claude exceeded `CLAUDE_TIMEOUT_MS` |
 | `rejected` | Task failed validation |
 
-**Review gate enforcement**: For `mode=review`, the worker never emits `completed`. It always parses the verdict and emits `review_pass` or `review_fail`. A hard safety gate (second check) ensures this even if the normal path is bypassed.
+**Review gate enforcement**: For `mode=review` (single-shot), the worker never emits `completed`. It always parses the verdict and emits `review_pass` or `review_fail`. A hard safety gate (second check) ensures this.
 
-### Additional `meta` fields for `review_fail`
+**Review loop**: For `mode=review` with `reviewLoop: true`, the worker manages the full loop internally. The result is `review_pass` (passed within N iterations), `escalated` (max iterations exhausted), or `failed`/`timeout` if a subprocess failed catastrophically.
+
+### Additional `meta` fields for `review_fail` (single-shot)
 
 | Field | Type | Description |
 |---|---|---|
 | `meta.reviewVerdict` | string | `"fail"` |
 | `meta.reviewSeverity` | string | Severity from `[REVIEW_FAIL severity=...]`, e.g. `"major"`, `"critical"`, `"unknown"` |
 | `meta.reviewFindings` | string | Findings body from inside `[REVIEW_FAIL]...[/REVIEW_FAIL]` (max 2000 chars) |
+| `meta.structuredFindings` | object[] or null | Parsed structured findings array (see [Findings Schema](#findings-schema-stage-22)) |
+
+### Additional top-level fields for `review_fail` and `escalated`
+
+Hoisted to top-level for direct orchestrator access (also present in `meta`):
+
+| Field | Type | Description |
+|---|---|---|
+| `structuredFindings` | object[] or null | Parsed findings array (see [Findings Schema](#findings-schema-stage-22)) |
+| `reviewFindings` | string or null | Plain-text findings (same as `meta.reviewFindings`) |
 
 ### Additional `meta` fields for `review_pass`
 
 | Field | Type | Description |
 |---|---|---|
 | `meta.reviewVerdict` | string | `"pass"` |
+| `meta.reviewIteration` | number | (loop only) Which iteration passed (1 = first try) |
+| `meta.reviewMaxIterations` | number | (loop only) Max iterations configured |
+| `meta.reviewLoopDurationMs` | number | (loop only) Total wall time for the entire loop |
+
+### Additional `meta` fields for `escalated`
+
+| Field | Type | Description |
+|---|---|---|
+| `meta.reviewVerdict` | string | `"fail"` |
+| `meta.reviewSeverity` | string | Severity of the last failed review |
+| `meta.reviewFindings` | string | Plain-text findings from the last failed review |
+| `meta.structuredFindings` | object[] or null | Structured findings from the last failed review |
+| `meta.reviewIteration` | number | Iteration count at escalation (equals `maxReviewIterations`) |
+| `meta.reviewMaxIterations` | number | Max iterations that were configured |
+| `meta.escalationReason` | string | Human-readable reason (e.g. `"max review iterations (3) reached without passing"`) |
+| `meta.reviewLoopDurationMs` | number | Total wall time for the entire loop |
+
+---
+
+## Findings Schema (Stage 2.2)
+
+When Claude's review output contains a `[REVIEW_FINDINGS_JSON]...[/REVIEW_FINDINGS_JSON]` block, the worker parses it into a structured array. This is set in `meta.structuredFindings` and hoisted to `structuredFindings` on `review_fail` and `escalated` results.
+
+### Finding Object
+
+| Field | Type | Values | Description |
+|---|---|---|---|
+| `id` | string | e.g. `"F1"`, `"F2"` | Unique finding identifier within this review |
+| `severity` | string | `"critical"`, `"major"`, `"minor"` | Issue severity (invalid values normalized to `"major"`) |
+| `file` | string | e.g. `"src/auth/login.js"` | File containing the issue |
+| `issue` | string | — | Brief description of the issue |
+| `risk` | string | — | Impact if left unresolved |
+| `required_fix` | string | — | What change is required |
+| `acceptance_check` | string | — | How to verify the fix was applied |
+
+### Example
+
+Claude review output:
+```
+[REVIEW_FAIL severity=critical]
+Found critical security issues.
+[REVIEW_FINDINGS_JSON]
+[
+  {
+    "id": "F1",
+    "severity": "critical",
+    "file": "src/auth/login.js",
+    "issue": "SQL injection via string concatenation",
+    "risk": "Full database compromise",
+    "required_fix": "Use parameterized queries for all SQL statements",
+    "acceptance_check": "No string concatenation in SQL queries; all queries use placeholders"
+  },
+  {
+    "id": "F2",
+    "severity": "major",
+    "file": "src/auth/auth.js",
+    "issue": "Passwords stored as plain text",
+    "risk": "Credential exposure if database is breached",
+    "required_fix": "Hash passwords with bcrypt (min cost 10) before storage",
+    "acceptance_check": "All stored password fields are bcrypt hashes"
+  }
+]
+[/REVIEW_FINDINGS_JSON]
+[/REVIEW_FAIL]
+```
+
+Parsed `structuredFindings`:
+```json
+[
+  {
+    "id": "F1",
+    "severity": "critical",
+    "file": "src/auth/login.js",
+    "issue": "SQL injection via string concatenation",
+    "risk": "Full database compromise",
+    "required_fix": "Use parameterized queries for all SQL statements",
+    "acceptance_check": "No string concatenation in SQL queries; all queries use placeholders"
+  },
+  {
+    "id": "F2",
+    "severity": "major",
+    "file": "src/auth/auth.js",
+    "issue": "Passwords stored as plain text",
+    "risk": "Credential exposure if database is breached",
+    "required_fix": "Hash passwords with bcrypt (min cost 10) before storage",
+    "acceptance_check": "All stored password fields are bcrypt hashes"
+  }
+]
+```
 
 ### Response
 
@@ -289,6 +401,23 @@ When `status` is `needs_input`, the worker also adds these fields at the top lev
       "content": "// current session implementation..."
     }
   ]
+}
+```
+
+## Example: review loop task payload (Stage 2.2)
+
+```json
+{
+  "taskId": "auth-review-042",
+  "mode": "review",
+  "reviewLoop": true,
+  "maxReviewIterations": 3,
+  "scope": {
+    "repoPath": "/Users/sigma/MovieCenter",
+    "branch": "agent/auth-refactor"
+  },
+  "instructions": "Review the authentication implementation for security issues.",
+  "patchInstructions": "Fix all security issues identified in the review findings. Original context: JWT-based auth refactor."
 }
 ```
 
