@@ -5,7 +5,8 @@
   "main": "worker.js",
   "scripts": {
     "start": "node worker.js",
-    "dry-test": "node test-dry-run.js"
+    "dry-test": "node test-dry-run.js",
+    "test-telemetry": "node test-telemetry.js"
   },
   "dependencies": {},
   "engines": {
