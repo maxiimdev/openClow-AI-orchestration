@@ -183,3 +183,47 @@
 - запреты и границы (`не трогать X`, `менять только Y`);
 - definition of done;
 - fallback-правило при неопределенности (например: "выбирай наиболее безопасный вариант и помечай в отчете").
+
+---
+
+## Completion/Ack Contract (обязательный user-facing апдейт)
+
+Проблема: технические пуши (`claimed/progress/report`) не всегда очевидны пользователю как финал задачи.
+
+Правило: при каждом terminal status оркестратор **обязан** отправить короткий человеческий апдейт в чат.
+
+Terminal statuses:
+- `completed`
+- `needs_input`
+- `failed`
+- `timeout`
+- `rejected`
+
+### Формат апдейта
+
+#### `completed`
+```text
+✅ DONE | <taskId>
+Что сделано: <1-2 строки>
+Пруф: <commit/PR/tests/path>
+Следующий шаг: <optional>
+```
+
+#### `needs_input`
+```text
+🟨 NEEDS_INPUT | <taskId>
+Вопрос: <question>
+Варианты: <A/B/C...>
+```
+
+#### `failed` / `timeout` / `rejected`
+```text
+❌ <STATUS> | <taskId>
+Где остановилось: <phase/message>
+Что уже сохранено: <diff/commit/none>
+Что делаем дальше: <resume/retry/fix>
+```
+
+### SLA
+- User-facing итоговый апдейт отправляется сразу после фиксации terminal status (без ручного пинга пользователя).
+- Если terminal status получен без полезных деталей, оркестратор сначала делает быструю проверку (`GET /api/task/:id`), затем отправляет сводку.
