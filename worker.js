@@ -36,6 +36,7 @@ const CFG = {
   claudeTimeoutMs: int("CLAUDE_TIMEOUT_MS", 180000),
   claudeBypassPermissions:
     (process.env.CLAUDE_BYPASS_PERMISSIONS || "true").toLowerCase() === "true",
+  claudeModel: process.env.CLAUDE_MODEL || "sonnet",
   needsInputDebug:
     (process.env.NEEDS_INPUT_DEBUG || "false").toLowerCase() === "true",
 };
@@ -44,6 +45,7 @@ const STDOUT_LIMIT = 200 * 1024;
 const STDERR_LIMIT = 200 * 1024;
 const BRANCH_RE = /^(agent|hotfix|feature|bugfix)\/[a-zA-Z0-9._-]+$/;
 const BLOCKED_BRANCHES = new Set(["main", "master"]);
+const ALLOWED_MODELS = new Set(["sonnet", "opus"]);
 const NEEDS_INPUT_RE = /\[NEEDS_INPUT\]([\s\S]*?)\[\/NEEDS_INPUT\]/;
 
 function required(key) {
@@ -151,6 +153,10 @@ function validateTask(task) {
     }
   } else if (task.mode !== "dry_run") {
     errors.push("missing scope for non-dry_run task");
+  }
+
+  if (task.model && !ALLOWED_MODELS.has(task.model)) {
+    errors.push(`invalid model override: ${task.model} (allowed: ${[...ALLOWED_MODELS].join(", ")})`);
   }
 
   return errors;
@@ -403,6 +409,8 @@ function _normalizeAuqOptions(options) {
 async function executeTask(task) {
   const start = Date.now();
 
+  const model = task.model || CFG.claudeModel;
+
   // dry_run: echo without running CLI
   if (task.mode === "dry_run") {
     const prompt = buildPrompt(task);
@@ -417,6 +425,7 @@ async function executeTask(task) {
         durationMs: Date.now() - start,
         repoPath: task.scope?.repoPath || null,
         branch: task.scope?.branch || null,
+        model,
       },
     };
   }
@@ -428,12 +437,13 @@ async function executeTask(task) {
   await sendEvent(task, "progress", "git", `checking out branch ${task.scope.branch}`);
   await gitCheckout(repoPath, task.scope.branch);
 
-  await sendEvent(task, "progress", "claude", "spawning claude CLI");
+  await sendEvent(task, "progress", "claude", `spawning claude CLI (model: ${model})`, { model });
 
   return new Promise((resolve) => {
     const args = [
       "-p", prompt,
       "--output-format", "json",
+      "--model", model,
     ];
 
     if (CFG.claudeBypassPermissions) {
@@ -513,6 +523,7 @@ async function executeTask(task) {
           repoPath,
           branch: task.scope.branch,
           exitCode: code,
+          model,
         },
       });
     });
@@ -535,6 +546,7 @@ async function executeTask(task) {
           durationMs: Date.now() - start,
           repoPath,
           branch: task.scope.branch,
+          model,
         },
       });
     });

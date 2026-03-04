@@ -2,6 +2,31 @@
 
 Local worker that polls a remote orchestrator for tasks and executes them via Claude Code CLI.
 
+## Documentation
+
+- **[ARCHITECTURE.md](ARCHITECTURE.md)** — System overview, component responsibilities, task state, failure points
+- **[TASK_SCHEMA.md](TASK_SCHEMA.md)** — Task object schema, pull/result API contracts, validation rules, prompt structure
+- **[EVENT_CONTRACT.md](EVENT_CONTRACT.md)** — Full `POST /api/worker/event` contract, statuses, phases, payload examples
+- **[INTERACTIVE_FLOW.md](INTERACTIVE_FLOW.md)** — `needs_input` / `resume` lifecycle, `POST /api/task/resume` contract
+
+## Quickstart
+
+```bash
+# 1. Node 18+ required (uses native fetch, zero npm dependencies)
+node --version
+
+# 2. Configure environment
+cp .env.example .env
+# Edit .env: set ORCH_BASE_URL, WORKER_TOKEN, ALLOWED_REPOS
+
+# 3. Run the worker
+node worker.js
+
+# 4. (Optional) Run a local dry-run test
+mkdir -p /tmp/test-repo && cd /tmp/test-repo && git init
+node test-dry-run.js
+```
+
 ## Setup
 
 ```bash
@@ -26,6 +51,7 @@ CLAUDE_CMD=claude
 ALLOWED_REPOS=/Users/sigma/MovieCenter,/tmp/test-repo
 CLAUDE_TIMEOUT_MS=180000
 CLAUDE_BYPASS_PERMISSIONS=true
+CLAUDE_MODEL=sonnet
 ```
 
 ## Run
@@ -54,6 +80,50 @@ mkdir -p /tmp/test-repo && cd /tmp/test-repo && git init
 # run the test
 node test-dry-run.js
 ```
+
+## Model selection (sonnet / opus)
+
+**Default:** `sonnet` (Claude Sonnet 4.6) — fast, cost-effective, handles most tasks.
+
+### Override globally (env)
+
+```env
+CLAUDE_MODEL=opus
+```
+
+### Override per task
+
+Add `"model": "opus"` to the task payload when enqueueing:
+
+```json
+{
+  "taskId": "arch-redesign-001",
+  "mode": "implement",
+  "model": "opus",
+  "scope": { "repoPath": "/path/to/repo", "branch": "agent/redesign" },
+  "instructions": "Redesign the auth module..."
+}
+```
+
+Priority: `task.model` > `CLAUDE_MODEL` env > `"sonnet"`.
+
+Only `"sonnet"` and `"opus"` are allowed. An unknown model in `task.model` will be rejected at validation.
+
+### When to use opus
+
+- Complex architectural changes spanning many files
+- High-risk refactors where correctness is critical
+- Deep code review requiring nuanced understanding
+- Tasks where sonnet produced insufficient results on first attempt
+
+### When to use sonnet (default)
+
+- Routine implementation tasks
+- Simple bug fixes and small features
+- Tests, docs, config changes
+- Any task where speed and cost matter more than depth
+
+The selected model is included in `meta.model` of all events and results for traceability.
 
 ## Troubleshooting
 
@@ -112,8 +182,12 @@ The worker sends lifecycle events to `POST /api/worker/event` at each stage of t
 | Before spawning Claude CLI | `progress` | `claude` | `"spawning claude CLI"` |
 | Claude completed successfully | `completed` | `report` | `"task completed"` |
 | Claude exited non-zero | `failed` | `report` | `"task failed"` |
+| Claude needs input | `needs_input` | `claude` | `"needs input: <question>"` |
+| Task resumed with answer | `progress` | `report` | `"task resumed with user input"` |
 | Claude timed out | `timeout` | `claude` | `"claude process timed out"` |
 | Unexpected error in main loop | `failed` | `other` | error message |
+
+See [EVENT_CONTRACT.md](EVENT_CONTRACT.md) for the full contract, payload examples, and proof-based status guidance. See [INTERACTIVE_FLOW.md](INTERACTIVE_FLOW.md) for the `needs_input`/`resume` lifecycle.
 
 ### Server-side contract (implement on your server)
 
@@ -125,7 +199,7 @@ Content-Type: application/json
 {
   "workerId": "string",       // required
   "taskId": "string",         // required
-  "status": "string",         // required: claimed|started|progress|completed|failed|timeout|rejected
+  "status": "string",         // required: claimed|started|progress|needs_input|completed|failed|timeout|rejected
   "phase": "string",          // required: pull|validate|git|claude|push|pr|report|other
   "message": "string",        // optional, max 1000 chars
   "meta": {}                  // optional, task metadata (durationMs, exitCode, etc.)
