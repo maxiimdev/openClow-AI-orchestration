@@ -50,21 +50,46 @@ async function notifyTelegram(ev) {
   const key = `${ev.taskId}:${ev.status}:${ev.phase || 'other'}:${ev.message || ''}`;
   if (isDuplicate(key, TG_DEDUPE_TTL_MS)) return;
 
-  const icon = ({ completed: '✅', failed: '❌', timeout: '⏱️', rejected: '🚫', progress: '🔄', started: '🟦', claimed: '🟨' })[ev.status] || 'ℹ️';
+  const statusIcon = {
+    claimed: '🟡',
+    started: '🔎',
+    progress: '⚙️',
+    completed: '✅',
+    failed: '❌',
+    timeout: '⏱️',
+    rejected: '🚫'
+  };
+  const phaseIcon = {
+    pull: '📥',
+    plan: '🗺️',
+    validate: '🧪',
+    git: '🌿',
+    claude: '🤖',
+    report: '🧾',
+    push: '🚀',
+    pr: '🔗'
+  };
+
+  const icon = (['completed', 'failed', 'timeout', 'rejected'].includes(ev.status)
+    ? statusIcon[ev.status]
+    : phaseIcon[ev.phase] || statusIcon[ev.status]) || 'ℹ️';
+
   const statusRu = {
-    claimed: 'задача принята воркером',
-    started: 'начата проверка задачи',
-    progress: 'выполняется',
+    claimed: 'задача принята',
+    started: 'задача стартовала',
+    progress: 'выполнение',
     completed: 'задача выполнена',
-    failed: 'задача завершилась с ошибкой',
-    timeout: 'задача прервана по таймауту',
+    failed: 'ошибка выполнения',
+    timeout: 'таймаут выполнения',
     rejected: 'задача отклонена'
   }[ev.status] || ev.status;
+
   const phaseRu = {
-    pull: 'получение',
+    pull: 'получение задачи',
+    plan: 'план выполнения',
     validate: 'валидация',
-    git: 'git-этап',
-    claude: 'выполнение Claude',
+    git: 'git-операции',
+    claude: 'работа Claude',
     push: 'публикация',
     pr: 'создание PR',
     report: 'отчёт'
