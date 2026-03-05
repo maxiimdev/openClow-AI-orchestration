@@ -228,7 +228,12 @@ app.post('/api/worker/event', auth, (req, res) => {
   const task = db.tasks.find(x => x.taskId === taskId);
   if (!task) return res.status(404).json({ ok: false, error: 'task not found' });
 
-  const msg = String(message || '').slice(0, 1000);
+  let msg = String(message || '').slice(0, 1000);
+
+  // Normalize noisy worker-internal review marker errors into clean user-facing text.
+  if (normalizedStatus === 'review_fail' && msg.includes('No [REVIEW_PASS] or [REVIEW_FAIL] marker found')) {
+    msg = 'Review не прошёл: не найден валидный маркер результата ревью';
+  }
   if (!Array.isArray(task.events)) task.events = [];
   task.events.push({
     workerId,
@@ -242,7 +247,8 @@ app.post('/api/worker/event', auth, (req, res) => {
   saveStore(db);
 
   const notifyStatuses = new Set(['needs_input', 'review_fail', 'review_loop_fail', 'review_pass', 'escalated', 'completed', 'failed', 'timeout', 'rejected']);
-  if (notifyStatuses.has(normalizedStatus)) {
+  const isInternalTransportError = msg.includes('HTTP 400: {"ok":false,"error":"invalid status"}');
+  if (notifyStatuses.has(normalizedStatus) && !isInternalTransportError) {
     notifyTelegram({
       taskId,
       workerId,
