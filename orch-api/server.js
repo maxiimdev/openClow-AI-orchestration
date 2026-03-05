@@ -202,6 +202,7 @@ app.post('/api/worker/pull', auth, (req, res) => {
       instructions: task.instructions,
       constraints: task.constraints || [],
       contextSnippets: task.contextSnippets || [],
+      model: task.model || null,
       pendingAnswer: answer,
       question: task.question || null,
       options: task.options || null
@@ -299,7 +300,7 @@ app.post('/api/worker/result', auth, (req, res) => {
     return res.status(400).json({ ok: false, error: 'workerId, taskId, status required' });
   }
 
-  const allowed = new Set(['completed', 'failed', 'timeout', 'rejected', 'needs_input']);
+  const allowed = new Set(['completed', 'failed', 'timeout', 'rejected', 'needs_input', 'review_fail', 'review_loop_fail', 'review_pass', 'escalated']);
   if (!allowed.has(status)) return res.status(400).json({ ok: false, error: 'invalid status' });
 
   const db = loadStore();
