@@ -283,19 +283,40 @@ app.post('/api/worker/result', auth, (req, res) => {
   const task = db.tasks.find(x => x.taskId === taskId);
   if (!task) return res.status(404).json({ ok: false, error: 'task not found' });
 
-  task.status = status;
+  let finalStatus = status;
   if (status === 'needs_input') {
-    task.needsInputAt = new Date().toISOString();
-    task.question = question || null;
-    task.options = Array.isArray(options) ? options : null;
-    task.result = { workerId, status, output: output || {}, meta: meta || {}, context: context || null };
-  } else {
-    task.finishedAt = new Date().toISOString();
-    task.result = { workerId, status, output: output || {}, meta: meta || {} };
+    const q = typeof question === 'string' ? question.trim() : '';
+    const opts = Array.isArray(options) ? options.filter(Boolean) : [];
+    const hasStructuredQuestion = q.length >= 8;
+    const hasStructuredOptions = opts.length > 0;
+
+    // Guardrail: some workers may accidentally mark successful runs as needs_input
+    // by scraping random text fragments. Keep needs_input only when there is a
+    // meaningful question payload.
+    if (!hasStructuredQuestion && !hasStructuredOptions) {
+      finalStatus = Number(meta?.exitCode) === 0 ? 'completed' : 'failed';
+    }
+
+    if (finalStatus === 'needs_input') {
+      task.needsInputAt = new Date().toISOString();
+      task.question = q || null;
+      task.options = hasStructuredOptions ? opts : null;
+      task.result = { workerId, status: finalStatus, output: output || {}, meta: meta || {}, context: context || null };
+    }
   }
+
+  if (finalStatus !== 'needs_input') {
+    task.finishedAt = new Date().toISOString();
+    task.question = null;
+    task.options = null;
+    task.needsInputAt = null;
+    task.result = { workerId, status: finalStatus, output: output || {}, meta: meta || {} };
+  }
+
+  task.status = finalStatus;
   saveStore(db);
 
-  res.json({ ok: true, taskId, status });
+  res.json({ ok: true, taskId, status: finalStatus });
 });
 
 app.get('/api/task/:taskId', auth, (req, res) => {
