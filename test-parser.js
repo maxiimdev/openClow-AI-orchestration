@@ -152,16 +152,13 @@ test("raw text fallback (non-JSON stdout)", () => {
   assertEq(ni.question, "What now?", "question");
 });
 
-test("malformed marker — no question line → fallback", () => {
+test("malformed marker — no question line → null (strict requires question field)", () => {
   const stdout = JSON.stringify({
     type: "result",
     result: "hmm\n[NEEDS_INPUT]\njust some text without question: prefix\n[/NEEDS_INPUT]",
   });
   const ni = parseNeedsInput(stdout);
-  assert(ni !== null, "should not be null — marker was found");
-  assertEq(ni.question, "Clarification required", "fallback question");
-  assertEq(ni.options, null, "no options");
-  assertEq(ni.sourceType, "strict", "sourceType");
+  assertEq(ni, null, "no question field → null (not a real ask)");
 });
 
 test("no marker at all → null", () => {
@@ -172,15 +169,14 @@ test("no marker at all → null", () => {
   assertEq(parseNeedsInput(stdout), null);
 });
 
-test("marker without closing tag → heuristic fallback (has NEEDS_INPUT + question)", () => {
+test("marker without closing tag → null (strict requires matched tags)", () => {
   const stdout = JSON.stringify({
     type: "result",
     result: "text [NEEDS_INPUT]\nquestion: orphan marker that is long enough",
   });
   const ni = parseNeedsInput(stdout);
-  // No closing tag → strict fails, but heuristic D catches NEEDS_INPUT + question
-  assert(ni !== null, "heuristic should catch");
-  assertEq(ni.sourceType, "heuristic", "sourceType");
+  // No closing tag → strict marker doesn't match; heuristics removed
+  assertEq(ni, null, "unclosed marker must not trigger needs_input");
 });
 
 test("marker immediately after tag (no newline)", () => {
@@ -219,118 +215,82 @@ test("strict marker → sourceType=strict", () => {
   assertEq(parseNeedsInput(stdout).sourceType, "strict");
 });
 
-test("fenced json → sourceType=fenced", () => {
+test("fenced json with question key → null (heuristic removed)", () => {
   const stdout = JSON.stringify({
     type: "result",
     result: 'I need clarification:\n\n```json\n{"question":"Which framework?","options":["React","Vue"],"context":"frontend"}\n```\n',
   });
-  const ni = parseNeedsInput(stdout);
-  assert(ni !== null, "should detect fenced json");
-  assertEq(ni.sourceType, "fenced", "sourceType");
-  assertEq(ni.question, "Which framework?", "question");
-  assertEq(ni.options, ["React", "Vue"], "options");
-  assertEq(ni.context, "frontend", "context");
+  assertEq(parseNeedsInput(stdout), null, "fenced JSON must not trigger needs_input");
 });
 
-test("plain json object → sourceType=json", () => {
+test("plain json object with question key → null (heuristic removed)", () => {
   const stdout = JSON.stringify({
     type: "result",
     result: 'Here is my question for you:\n{"question":"What port?","options":["3000","8080"],"context":"server setup"}\nPlease answer.',
   });
-  const ni = parseNeedsInput(stdout);
-  assert(ni !== null, "should detect plain json");
-  assertEq(ni.sourceType, "json", "sourceType");
-  assertEq(ni.question, "What port?", "question");
-  assertEq(ni.options, ["3000", "8080"], "options");
+  assertEq(parseNeedsInput(stdout), null, "plain JSON must not trigger needs_input");
 });
 
-test("heuristic → sourceType=heuristic", () => {
+test("heuristic NEEDS_INPUT + question in prose → null (heuristic removed)", () => {
   const stdout = JSON.stringify({
     type: "result",
     result: "I encountered NEEDS_INPUT situation.\nMy question: which environment should I target?",
   });
-  const ni = parseNeedsInput(stdout);
-  assert(ni !== null, "heuristic should fire");
-  assertEq(ni.sourceType, "heuristic", "sourceType");
+  assertEq(parseNeedsInput(stdout), null, "heuristic must not trigger needs_input");
 });
 
-// ── Pipeline B: fenced json edge cases ──
+// ── Heuristic removal verification ──
+// Pipelines B (fenced JSON), C (plain JSON), D (heuristic) have been removed.
+// These tests verify they no longer trigger false positives.
 
-console.log("\n\x1b[36m=== fenced json (pipeline B) ===\x1b[0m\n");
+console.log("\n\x1b[36m=== heuristic removal (false-positive prevention) ===\x1b[0m\n");
 
-test("fenced json without 'json' tag", () => {
+test("fenced json without 'json' tag → null (removed)", () => {
   const stdout = JSON.stringify({
     type: "result",
     result: 'Need input:\n\n```\n{"question":"DB engine?","options":["pg","mysql"]}\n```\n',
   });
-  const ni = parseNeedsInput(stdout);
-  assert(ni !== null, "should detect untagged fence");
-  assertEq(ni.sourceType, "fenced");
-  assertEq(ni.question, "DB engine?");
+  assertEq(parseNeedsInput(stdout), null, "fenced JSON must not trigger");
 });
 
-test("fenced block without question key → skip to next pipeline", () => {
+test("fenced block without question key → null", () => {
   const stdout = JSON.stringify({
     type: "result",
     result: 'Some code:\n\n```json\n{"name":"config","version":"1.0"}\n```\nAll done.',
   });
-  assertEq(parseNeedsInput(stdout), null, "should not match non-question fence");
+  assertEq(parseNeedsInput(stdout), null);
 });
 
-test("prose + fenced json (real Claude pattern)", () => {
+test("prose + fenced json (was false positive) → null", () => {
   const stdout = JSON.stringify({
     type: "result",
-    result: "I've analyzed the codebase and I need some clarification before proceeding.\n\nI have a few questions about the implementation approach:\n\n```json\n{\n  \"question\": \"Should I use REST or GraphQL for the new API endpoints?\",\n  \"options\": [\"REST with Express\", \"GraphQL with Apollo\", \"tRPC\"],\n  \"context\": \"The existing codebase uses Express but has no API layer yet\"\n}\n```\n\nPlease let me know your preference and I'll proceed with the implementation.",
+    result: "I've analyzed the codebase and I need some clarification before proceeding.\n\n```json\n{\n  \"question\": \"Should I use REST or GraphQL?\",\n  \"options\": [\"REST\", \"GraphQL\"]\n}\n```\n\nPlease let me know.",
   });
-  const ni = parseNeedsInput(stdout);
-  assert(ni !== null, "must detect fenced json in prose");
-  assertEq(ni.sourceType, "fenced");
-  assertEq(ni.question, "Should I use REST or GraphQL for the new API endpoints?");
-  assertEq(ni.options, ["REST with Express", "GraphQL with Apollo", "tRPC"]);
-  assertEq(ni.context, "The existing codebase uses Express but has no API layer yet");
+  assertEq(parseNeedsInput(stdout), null, "fenced JSON in prose must not trigger");
 });
 
-// ── Pipeline C: plain JSON object ──
-
-console.log("\n\x1b[36m=== plain json (pipeline C) ===\x1b[0m\n");
-
-test("json object with nested options array", () => {
+test("plain json object with question key in prose → null (removed)", () => {
   const stdout = JSON.stringify({
     type: "result",
-    result: 'Before deciding, I need to know: {"question":"Auth method?","options":["JWT","session","OAuth2"],"context":"user auth"} — thanks!',
+    result: 'Before deciding: {"question":"Auth method?","options":["JWT","session"]} — thanks!',
   });
-  const ni = parseNeedsInput(stdout);
-  assert(ni !== null);
-  assertEq(ni.sourceType, "json");
-  assertEq(ni.question, "Auth method?");
-  assertEq(ni.options, ["JWT", "session", "OAuth2"]);
+  assertEq(parseNeedsInput(stdout), null, "plain JSON must not trigger");
 });
 
-test("json object with options as key-value map", () => {
+test("json object with options as key-value map → null (removed)", () => {
   const stdout = JSON.stringify({
     type: "result",
-    result: 'I need input: {"question":"Which approach?","options":{"A":"Use hooks","B":"Use classes","C":"Use HOCs"},"context":"React refactor"}',
+    result: 'I need input: {"question":"Which approach?","options":{"A":"hooks","B":"classes"}}',
   });
-  const ni = parseNeedsInput(stdout);
-  assert(ni !== null);
-  assertEq(ni.sourceType, "json");
-  assertEq(ni.question, "Which approach?");
-  assertEq(ni.options, ["A: Use hooks", "B: Use classes", "C: Use HOCs"], "map→array");
+  assertEq(parseNeedsInput(stdout), null, "plain JSON must not trigger");
 });
 
-// ── Pipeline D: heuristic ──
-
-console.log("\n\x1b[36m=== heuristic (pipeline D) ===\x1b[0m\n");
-
-test("NEEDS_INPUT in prose with question word", () => {
+test("NEEDS_INPUT in prose with question word → null (removed)", () => {
   const stdout = JSON.stringify({
     type: "result",
     result: "I've hit a NEEDS_INPUT point. My question: should I refactor the auth module first or add tests?",
   });
-  const ni = parseNeedsInput(stdout);
-  assert(ni !== null, "heuristic should catch");
-  assertEq(ni.sourceType, "heuristic");
-  assert(ni.question.length > 10, "question extracted");
+  assertEq(parseNeedsInput(stdout), null, "heuristic must not trigger");
 });
 
 test("no NEEDS_INPUT signal at all → null", () => {
@@ -339,6 +299,42 @@ test("no NEEDS_INPUT signal at all → null", () => {
     result: "Task completed. All files updated successfully. No questions remain.",
   });
   assertEq(parseNeedsInput(stdout), null);
+});
+
+// ── Forensic regression: "blocks promotion to needs_input." ──
+
+console.log("\n\x1b[36m=== forensic regression (v4) ===\x1b[0m\n");
+
+test("prose with NEEDS_INPUT + question (observed regression) → null", () => {
+  const stdout = JSON.stringify({
+    type: "result",
+    result: "Implementation complete. The NEEDS_INPUT mechanism blocks promotion to needs_input. The question of whether to use markers or tool calls is addressed in the design doc.",
+  });
+  assertEq(parseNeedsInput(stdout), null, "must not trigger on prose about NEEDS_INPUT");
+});
+
+test("[NEEDS_INPUT] inside code fence → null", () => {
+  const stdout = JSON.stringify({
+    type: "result",
+    result: "Here is the syntax:\n\n```\n[NEEDS_INPUT]\nquestion: Which env?\noptions: dev, staging\n[/NEEDS_INPUT]\n```\n\nDone.",
+  });
+  assertEq(parseNeedsInput(stdout), null, "code fence must suppress marker");
+});
+
+test("[NEEDS_INPUT] inline in heading → null", () => {
+  const stdout = JSON.stringify({
+    type: "result",
+    result: "# How [NEEDS_INPUT] Works\n\nThe marker is used for clarification.\nquestion: This is not a real question.\n\nDone.",
+  });
+  assertEq(parseNeedsInput(stdout), null, "heading mention must not trigger");
+});
+
+test("[NEEDS_INPUT] at line start but no question → null", () => {
+  const stdout = JSON.stringify({
+    type: "result",
+    result: "[NEEDS_INPUT]\ncontext: informational only, no question\n[/NEEDS_INPUT]\n\nDone.",
+  });
+  assertEq(parseNeedsInput(stdout), null, "no question field → null");
 });
 
 // ── normalizeOptions ──
@@ -369,9 +365,9 @@ test("empty string → null", () => {
   assertEq(normalizeOptions(""), null);
 });
 
-// ── AskUserQuestion extraction (pipeline E) ──
+// ── AskUserQuestion extraction (pipeline B, formerly E) ──
 
-console.log("\n\x1b[36m=== AskUserQuestion (pipeline E) ===\x1b[0m\n");
+console.log("\n\x1b[36m=== AskUserQuestion (pipeline B) ===\x1b[0m\n");
 
 test("permission_denials with AskUserQuestion → extracted", () => {
   const stdout = JSON.stringify({
@@ -508,7 +504,7 @@ test("parseNeedsInput falls through to AskUserQuestion (no marker in result text
       },
     ],
   });
-  // parseNeedsInput should find nothing in A-D, then fall through to E
+  // parseNeedsInput should find no marker (A), then fall through to B (AUQ)
   const ni = parseNeedsInput(stdout);
   assert(ni !== null, "parseNeedsInput should catch AskUserQuestion");
   assertEq(ni.sourceType, "ask_user_question");
@@ -516,16 +512,13 @@ test("parseNeedsInput falls through to AskUserQuestion (no marker in result text
   assertEq(ni.options, ["TypeScript — Type-safe", "JavaScript — No build step"]);
 });
 
-test("parseNeedsInput — question always non-null on match (never returns null question)", () => {
-  // Ensure normalizePayload fallback works
+test("parseNeedsInput — marker without question field returns null (not an ask)", () => {
   const stdout = JSON.stringify({
     type: "result",
     result: "[NEEDS_INPUT]\nno question key here\n[/NEEDS_INPUT]",
   });
   const ni = parseNeedsInput(stdout);
-  assert(ni !== null);
-  assert(typeof ni.question === "string" && ni.question.length > 0, "question must be non-empty string");
-  assertEq(ni.question, "Clarification required", "fallback question text");
+  assertEq(ni, null, "marker without question must return null");
 });
 
 test("parseNeedsInput — options null when not specified (never empty array)", () => {
