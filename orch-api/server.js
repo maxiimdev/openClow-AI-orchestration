@@ -222,14 +222,37 @@ app.post('/api/worker/event', auth, (req, res) => {
     'needs_input', 'review_fail', 'review_loop_fail', 'review_pass', 'escalated', 'resumed'
   ]);
 
-  const normalizedStatus = allowed.has(status) ? status : 'progress';
-  const normalizedPhase = phase || 'other';
+  let normalizedStatus = allowed.has(status) ? status : 'progress';
+  let normalizedPhase = phase || 'other';
 
   const db = loadStore();
   const task = db.tasks.find(x => x.taskId === taskId);
   if (!task) return res.status(404).json({ ok: false, error: 'task not found' });
 
   let msg = String(message || '').slice(0, 1000);
+
+  // Guardrail: suppress false needs_input events caused by report-text scraping.
+  // This mirrors /api/worker/result strict gating so Telegram does not get phantom asks.
+  if (normalizedStatus === 'needs_input') {
+    const q = typeof meta?.question === 'string' ? meta.question.trim() : '';
+    const opts = Array.isArray(meta?.options) ? meta.options.filter(Boolean) : [];
+    const hasStructuredQuestion = q.length >= 8 && q.toLowerCase() !== 'clarification required';
+    const hasStructuredOptions = opts.length > 0;
+    const hasContext = meta?.context != null;
+
+    const strictModes = new Set(['implement', 'review']);
+    const strictMode = strictModes.has(String(task.mode || '').toLowerCase()) || task.orchestratedLoop === true;
+
+    const allowNeedsInputEvent = strictMode
+      ? (hasStructuredQuestion && (hasStructuredOptions || hasContext))
+      : (hasStructuredQuestion || hasStructuredOptions || hasContext);
+
+    if (!allowNeedsInputEvent) {
+      normalizedStatus = 'progress';
+      normalizedPhase = 'report';
+      msg = 'suppressed false needs_input event';
+    }
+  }
 
   // Normalize noisy worker-internal review marker errors into clean user-facing text.
   if (normalizedStatus === 'review_fail' && msg.includes('No [REVIEW_PASS] or [REVIEW_FAIL] marker found')) {
