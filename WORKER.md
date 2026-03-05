@@ -25,6 +25,7 @@ node worker.js
 | `CLAUDE_BYPASS_PERMISSIONS` | `true` | Pass `--dangerously-skip-permissions` |
 | `HEARTBEAT_INTERVAL_MS` | `90000` | Keepalive period when Claude is silent |
 | `NEEDS_INPUT_DEBUG` | `false` | Verbose needs_input parsing logs |
+| `REVIEW_MAX_ITERATIONS` | `3` | Default max review iterations for loops |
 
 ## Event schema
 
@@ -52,13 +53,17 @@ All events are POSTed to `POST /api/worker/event`:
 | `progress` | `validate` | Validation passed |
 | `progress` | `git` | Git checkout in progress |
 | `progress` | `claude` | Claude subprocess spawned |
+| `progress` | `orchestrate` | Stage transition in orchestrated/review loop |
 | `progress` | `report` | About to POST result |
+| `context_reset` | `orchestrate` | New Claude session starting (orchestrated/review loop) |
 | `keepalive` | `claude` | Heartbeat while Claude is silent |
 | `risk` | `claude` | Risk condition detected |
 | `timeout` | `claude` | Claude exceeded `CLAUDE_TIMEOUT_MS` |
 | `needs_input` | `claude` | Claude asked a question; task paused |
-| `review_pass` | `report` | Review task emitted `[REVIEW_PASS]` |
-| `review_fail` | `report` | Review task emitted `[REVIEW_FAIL …]` |
+| `review_pass` | `report` | Review passed; `[REVIEW_PASS]` emitted by Claude |
+| `review_fail` | `report` | Review failed; `[REVIEW_FAIL …]` emitted by Claude |
+| `review_loop_fail` | `report` | Intermediate review fail in loop; patch will follow |
+| `escalated` | `report` | Loop exhausted max iterations without passing |
 | `completed` | `report` | Task finished successfully |
 | `failed` | `report` | Task failed |
 
@@ -76,10 +81,12 @@ All events are POSTed to `POST /api/worker/event`:
 
 ### Plan steps by mode
 
-| Mode | Steps |
+| Mode / flags | Steps |
 |---|---|
 | `dry_run` | `validate → report` |
 | `implement / tests / review` | `validate → checkout {branch} → spawn claude ({model}) → report` |
+| `review` + `reviewLoop:true` | `validate → checkout → review_loop (max N iters) → report` |
+| any mode + `orchestratedLoop:true` | `validate → checkout → orchestrated_loop: implement→review[→patch→review]* → report` |
 
 ### Keepalive meta
 
@@ -115,26 +122,75 @@ Claude exits with a non-zero code.
 | `tests` | Same as implement |
 | `review` | Same, but result must include `[REVIEW_PASS]` or `[REVIEW_FAIL …]` marker |
 
+## Task flags
+
+| Flag | Type | Description |
+|---|---|---|
+| `reviewLoop` | boolean | Enable review-patch loop (mode `review` only). Runs review → patch → re-review until pass or `maxReviewIterations`. |
+| `orchestratedLoop` | boolean | Enable full orchestrated loop (any mode). Runs implement → review → [patch → re-review]* until pass or `maxReviewIterations`. |
+| `maxReviewIterations` | number | Override max iterations for `reviewLoop`/`orchestratedLoop` (default: `REVIEW_MAX_ITERATIONS`). |
+| `patchInstructions` | string | Custom instructions for patch runs in loops. Defaults to a generated prompt based on `instructions`. |
+
 ## Stage gates
 
 ### Stage 1 — needs_input / resume
 
-If Claude's output contains a `[NEEDS_INPUT]…[/NEEDS_INPUT]` block (or a JSON
-question object, fenced block, or `AskUserQuestion` permission denial), the task
-is posted back with `status: "needs_input"` and a `meta.question` field.  The
-orchestrator re-queues it with `pendingAnswer`, which the worker injects into the
-next prompt as a `## Continuation — User Answer` section.
+If Claude's output contains a `[NEEDS_INPUT]…[/NEEDS_INPUT]` block or an
+`AskUserQuestion` permission denial, the task is posted back with
+`status: "needs_input"` and a `meta.question` field.  The orchestrator re-queues
+it with `pendingAnswer`, injected as a `## Continuation — User Answer` section.
+
+**Review mode restriction:** In `review` mode (including loops), only explicit
+`[NEEDS_INPUT]…[/NEEDS_INPUT]` markers and `AskUserQuestion` tool calls trigger
+`needs_input`. Heuristic detection (JSON objects with `question` key, fenced
+blocks, NEEDS_INPUT tokens in review commentary) is suppressed to prevent false
+positives from review output text.
 
 ### Stage 2 — review gate
 
 `review` mode tasks can never complete with `status: "completed"`.  The worker
 parses `[REVIEW_PASS]` / `[REVIEW_FAIL severity=…]…[/REVIEW_FAIL]` markers from
 Claude's output and translates them to `review_pass` / `review_fail`.  If neither
-marker is present the task is treated as `review_fail`.
+marker is present the task is treated as `review_fail`.  This gate applies to
+single-shot review tasks; loop tasks are handled by their respective loop runners.
+
+### Stage 3 — review loop (`reviewLoop: true`)
+
+When a `review` mode task has `reviewLoop: true`, the worker orchestrates:
+
+```
+review (fresh context) → [REVIEW_FAIL] → patch (fresh context)
+→ re-review (fresh context, +diff snippet) → ... → [REVIEW_PASS] → review_pass
+                                                  → exhausted    → escalated
+```
+
+Each Claude invocation is an independent subprocess with no session carryover.
+The `review_loop_fail` event is emitted after each failed iteration.
+
+### Stage 4 — orchestrated loop (`orchestratedLoop: true`)
+
+When a task has `orchestratedLoop: true`, the worker orchestrates:
+
+```
+implement (fresh context)
+→ review (fresh context) → [REVIEW_PASS] → review_pass
+                        → [REVIEW_FAIL] → patch (fresh context)
+                                       → re-review (fresh context, +diff snippet)
+                                       → ... repeat until pass or maxReviewIterations
+                                       → escalated
+```
+
+A `context_reset` event (status `context_reset`, phase `orchestrate`) is emitted
+before each new Claude session with `meta.phase`, `meta.iteration`, and
+`meta.contextReset: true`. Terminal statuses: `review_pass`, `escalated`.
 
 ## Tests
 
 ```bash
-node test-dry-run.js     # sanity check: one dry_run cycle
-node test-telemetry.js   # step telemetry, heartbeat, near-timeout risk
+node test-dry-run.js           # dry_run cycle
+node test-telemetry.js         # step telemetry, heartbeat, near-timeout risk
+node test-needs-input.js       # needs_input → resume → completed cycle
+node test-stage2-review-gate.js  # single-shot review gate
+node test-stage2-review-loop.js  # reviewLoop: fail→pass, always-fail→escalated
+node test-flow-hardening.js    # false needs_input regression + orchestrated loop
 ```
