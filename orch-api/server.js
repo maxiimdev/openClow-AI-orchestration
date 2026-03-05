@@ -313,11 +313,23 @@ app.post('/api/worker/result', auth, (req, res) => {
     const opts = Array.isArray(options) ? options.filter(Boolean) : [];
     const hasStructuredQuestion = q.length >= 8;
     const hasStructuredOptions = opts.length > 0;
+    const hasContext = context != null;
 
-    // Guardrail: some workers may accidentally mark successful runs as needs_input
-    // by scraping random text fragments. Keep needs_input only when there is a
-    // meaningful question payload.
-    if (!hasStructuredQuestion && !hasStructuredOptions) {
+    // Stricter gate for implementation/review flows: only allow needs_input when
+    // ask payload is explicit and structured (options/context), not free-text.
+    const strictModes = new Set(['implement', 'review']);
+    const strictMode = strictModes.has(String(task.mode || '').toLowerCase()) || task.orchestratedLoop === true;
+
+    let allowNeedsInput = false;
+    if (strictMode) {
+      allowNeedsInput = hasStructuredQuestion && (hasStructuredOptions || hasContext);
+    } else {
+      allowNeedsInput = hasStructuredQuestion || hasStructuredOptions || hasContext;
+    }
+
+    // Guardrail: workers may accidentally mark successful runs as needs_input by
+    // scraping report text fragments. In strict modes, downgrade to terminal.
+    if (!allowNeedsInput) {
       finalStatus = Number(meta?.exitCode) === 0 ? 'completed' : 'failed';
     }
 
