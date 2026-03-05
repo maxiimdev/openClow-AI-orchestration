@@ -53,6 +53,35 @@ function log(level, msg, meta = {}) {
   console.log(JSON.stringify(entry));
 }
 
+// ── EVENT FILTER ────────────────────────────────────────────────────────────
+//
+// Only user-relevant lifecycle events reach Telegram.
+// Technical/intermediate events are suppressed server-side.
+//
+// Suppressed statuses (always):
+//   started     — internal validation kickoff, not useful to end-user
+//   keepalive   — heartbeat noise
+//   risk        — near-timeout / non-zero exit (internal diagnostic)
+//
+// Suppressed progress phases:
+//   plan        — step plan details (internal)
+//   validate    — "validation passed" (noise)
+//   git         — git checkout (internal)
+//   claude      — "spawning claude" (internal)
+//   report      — "reporting result" (internal)
+//   review_loop — intermediate loop steps (user sees _fail/_pass instead)
+
+const SUPPRESSED_STATUSES = new Set(["started", "keepalive", "risk"]);
+const SUPPRESSED_PROGRESS_PHASES = new Set([
+  "plan", "validate", "git", "claude", "report", "review_loop",
+]);
+
+function shouldSuppress(ev) {
+  if (SUPPRESSED_STATUSES.has(ev.status)) return true;
+  if (ev.status === "progress" && SUPPRESSED_PROGRESS_PHASES.has(ev.phase)) return true;
+  return false;
+}
+
 // ── DEDUPE ──────────────────────────────────────────────────────────────────
 
 const seen = new Map();
@@ -74,41 +103,169 @@ setInterval(() => {
   }
 }, 60000).unref();
 
-// ── TELEGRAM ────────────────────────────────────────────────────────────────
+// ── FORMAT ──────────────────────────────────────────────────────────────────
+//
+// User-facing label mapping (emoji + Russian/English label per status):
+//
+//   claimed          → 📥 Задача получена
+//   needs_input      → ❓ Нужен ответ
+//   review_pass      → ✅ Review pass
+//   review_fail      → ⛔ Review не прошёл
+//   review_loop_fail → 🔁 Нужен patch
+//   escalated        → ⚠️ Эскалация
+//   completed        → ✅ Выполнено
+//   failed           → ❌ Ошибка
+//   timeout          → ⏰ Таймаут
+//   rejected         → 🚫 Отклонено
+//   resumed          → ↩️ Возобновлено
 
-const STATUS_EMOJI = {
-  claimed: "\u{1F4E5}",   // 📥
-  started: "\u{1F680}",   // 🚀
-  progress: "\u{2699}",   // ⚙
-  completed: "\u{2705}",  // ✅
-  failed: "\u{274C}",     // ❌
-  timeout: "\u{23F0}",    // ⏰
-  rejected: "\u{1F6AB}",  // 🚫
+const STATUS_LABELS = {
+  claimed:          { emoji: "\u{1F4E5}", label: "Задача получена" },   // 📥
+  needs_input:      { emoji: "\u2753",    label: "Нужен ответ" },       // ❓
+  review_pass:      { emoji: "\u2705",    label: "Review pass" },       // ✅
+  review_fail:      { emoji: "\u26D4",    label: "Review не прошёл" },  // ⛔
+  review_loop_fail: { emoji: "\u{1F501}", label: "Нужен patch" },       // 🔁
+  escalated:        { emoji: "\u26A0",    label: "Эскалация" },         // ⚠️
+  completed:        { emoji: "\u2705",    label: "Выполнено" },         // ✅
+  failed:           { emoji: "\u274C",    label: "Ошибка" },            // ❌
+  timeout:          { emoji: "\u23F0",    label: "Таймаут" },           // ⏰
+  rejected:         { emoji: "\u{1F6AB}", label: "Отклонено" },         // 🚫
+  resumed:          { emoji: "\u21A9",    label: "Возобновлено" },      // ↩️
 };
 
 function formatMessage(ev) {
-  const emoji = STATUS_EMOJI[ev.status] || "\u{2753}"; // ❓
-  const header = `${emoji} [${ev.status}/${ev.phase || "—"}] <b>${escapeHtml(ev.taskId)}</b>`;
+  const def = STATUS_LABELS[ev.status];
+  const emoji = def ? def.emoji : "\u2753";
+  const label = def ? def.label : ev.status;
 
-  const lines = [header];
+  const lines = [
+    `${emoji} <b>${escapeHtml(label)}</b>`,
+    `<code>${escapeHtml(ev.taskId)}</code>`,
+  ];
 
-  if (ev.message) {
-    lines.push(escapeHtml(ev.message));
-  }
+  switch (ev.status) {
+    case "claimed": {
+      if (ev.workerId) {
+        lines.push(`Worker: <code>${escapeHtml(ev.workerId)}</code>`);
+      }
+      break;
+    }
 
-  const extras = [];
-  if (ev.meta?.durationMs != null) {
-    extras.push(`duration: ${(ev.meta.durationMs / 1000).toFixed(1)}s`);
-  }
-  if (ev.meta?.exitCode != null) {
-    extras.push(`exit: ${ev.meta.exitCode}`);
-  }
-  if (extras.length) {
-    lines.push(`<i>${escapeHtml(extras.join(" | "))}</i>`);
-  }
+    case "needs_input": {
+      const q = ev.meta?.question || ev.message || "";
+      if (q) lines.push(escapeHtml(q.slice(0, 300)));
+      const opts = ev.meta?.options;
+      if (Array.isArray(opts) && opts.length) {
+        lines.push(opts.map((o, i) => `  ${i + 1}. ${escapeHtml(String(o))}`).join("\n"));
+      }
+      break;
+    }
 
-  if (ev.workerId) {
-    lines.push(`<code>${escapeHtml(ev.workerId)}</code>`);
+    case "review_pass": {
+      const iter = ev.meta?.reviewIteration;
+      const maxIter = ev.meta?.reviewMaxIterations;
+      if (iter && maxIter) {
+        lines.push(`<i>iter ${iter}/${maxIter}</i>`);
+      }
+      const durationMs = ev.meta?.reviewLoopDurationMs ?? ev.meta?.durationMs;
+      if (durationMs != null) {
+        lines.push(`<i>${(durationMs / 1000).toFixed(1)}s</i>`);
+      }
+      break;
+    }
+
+    case "review_fail": {
+      const sev = ev.meta?.reviewSeverity || "unknown";
+      lines.push(`Severity: <b>${escapeHtml(sev)}</b>`);
+      const findings = (ev.meta?.reviewFindings || "").trim().slice(0, 200);
+      if (findings) lines.push(`<i>${escapeHtml(findings)}</i>`);
+      const sf = ev.meta?.structuredFindings;
+      if (Array.isArray(sf) && sf.length) {
+        lines.push(`${sf.length} finding(s)`);
+      }
+      break;
+    }
+
+    case "review_loop_fail": {
+      const iter = ev.meta?.iteration;
+      const maxIter = ev.meta?.maxIter;
+      const sev = ev.meta?.reviewSeverity || "unknown";
+      if (iter && maxIter) {
+        lines.push(`Iter ${iter}/${maxIter} · severity: <b>${escapeHtml(sev)}</b>`);
+      }
+      const findings = (ev.meta?.reviewFindings || "").trim().slice(0, 150);
+      if (findings) lines.push(`<i>${escapeHtml(findings)}</i>`);
+      const sf = ev.meta?.structuredFindings;
+      if (Array.isArray(sf) && sf.length) {
+        lines.push(`${sf.length} finding(s) — patch будет применён`);
+      }
+      break;
+    }
+
+    case "escalated": {
+      const reason = (ev.meta?.escalationReason || "max iterations reached").slice(0, 150);
+      lines.push(`<i>${escapeHtml(reason)}</i>`);
+      const sf = ev.meta?.structuredFindings;
+      if (Array.isArray(sf) && sf.length) {
+        lines.push(`${sf.length} unresolved finding(s)`);
+      }
+      const durationMs = ev.meta?.reviewLoopDurationMs;
+      if (durationMs != null) {
+        lines.push(`<i>${(durationMs / 1000).toFixed(1)}s</i>`);
+      }
+      break;
+    }
+
+    case "completed": {
+      const parts = [];
+      if (ev.meta?.durationMs != null) parts.push(`${(ev.meta.durationMs / 1000).toFixed(1)}s`);
+      if (ev.meta?.exitCode != null) parts.push(`exit:${ev.meta.exitCode}`);
+      if (parts.length) lines.push(`<i>${escapeHtml(parts.join(" | "))}</i>`);
+      break;
+    }
+
+    case "failed": {
+      const parts = [];
+      if (ev.meta?.durationMs != null) parts.push(`${(ev.meta.durationMs / 1000).toFixed(1)}s`);
+      if (ev.meta?.exitCode != null) parts.push(`exit:${ev.meta.exitCode}`);
+      if (parts.length) lines.push(`<i>${escapeHtml(parts.join(" | "))}</i>`);
+      // Show message only if it's not the generic "task failed"
+      const msg = (ev.message || "").trim();
+      if (msg && msg !== "task failed") {
+        lines.push(`<i>${escapeHtml(msg.slice(0, 150))}</i>`);
+      }
+      break;
+    }
+
+    case "timeout": {
+      const tms = ev.meta?.timeoutMs;
+      if (tms != null) lines.push(`<i>after ${Math.round(tms / 1000)}s</i>`);
+      break;
+    }
+
+    case "rejected": {
+      const errs = ev.meta?.errors;
+      if (Array.isArray(errs) && errs.length) {
+        lines.push(`<i>${escapeHtml(errs.join("; ").slice(0, 200))}</i>`);
+      } else {
+        const msg = (ev.message || "").trim();
+        if (msg) lines.push(`<i>${escapeHtml(msg.slice(0, 200))}</i>`);
+      }
+      break;
+    }
+
+    case "resumed": {
+      const who = ev.meta?.answeredBy || "";
+      if (who) lines.push(`by <code>${escapeHtml(who)}</code>`);
+      break;
+    }
+
+    default: {
+      // Catch-all: show message if present
+      const msg = (ev.message || "").trim();
+      if (msg) lines.push(escapeHtml(msg.slice(0, 200)));
+      break;
+    }
   }
 
   return lines.join("\n");
@@ -120,6 +277,8 @@ function escapeHtml(str) {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
 }
+
+// ── TELEGRAM ────────────────────────────────────────────────────────────────
 
 async function sendTelegram(text) {
   const url = `https://api.telegram.org/bot${CFG.tgToken}/sendMessage`;
@@ -159,7 +318,7 @@ app.use(express.json({ limit: "64kb" }));
 
 // health
 app.get("/health", (_req, res) => {
-  res.json({ ok: true, service: "tg-notifier", version: "0.1.0" });
+  res.json({ ok: true, service: "tg-notifier", version: "0.2.0" });
 });
 
 // main endpoint
@@ -172,6 +331,12 @@ app.post("/notify/event", auth, async (req, res) => {
   if (!ev.status) missing.push("status");
   if (missing.length) {
     return res.status(400).json({ ok: false, error: `missing fields: ${missing.join(", ")}` });
+  }
+
+  // suppress technical/intermediate events before they reach Telegram
+  if (shouldSuppress(ev)) {
+    log("debug", "suppressed", { taskId: ev.taskId, status: ev.status, phase: ev.phase });
+    return res.json({ ok: true, suppressed: true });
   }
 
   // dedupe
@@ -197,3 +362,7 @@ app.post("/notify/event", auth, async (req, res) => {
 app.listen(CFG.port, () => {
   log("info", "notifier started", { port: CFG.port, chatId: CFG.tgChatId });
 });
+
+// ── EXPORTS (for testing) ───────────────────────────────────────────────────
+
+module.exports = { shouldSuppress, formatMessage, escapeHtml, STATUS_LABELS };
