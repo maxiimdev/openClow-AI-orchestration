@@ -76,9 +76,7 @@ async function notifyTelegram(ev) {
     pr: '🔗'
   };
 
-  const icon = (['completed', 'failed', 'timeout', 'rejected'].includes(ev.status)
-    ? statusIcon[ev.status]
-    : phaseIcon[ev.phase] || statusIcon[ev.status]) || 'ℹ️';
+  const icon = statusIcon[ev.status] || phaseIcon[ev.phase] || 'ℹ️';
 
   const statusRu = {
     claimed: 'задача принята',
@@ -222,7 +220,9 @@ app.post('/api/worker/event', auth, (req, res) => {
     'completed', 'failed', 'timeout', 'rejected',
     'needs_input', 'review_fail', 'review_loop_fail', 'review_pass', 'escalated', 'resumed'
   ]);
-  if (!allowed.has(status)) return res.status(400).json({ ok: false, error: 'invalid status' });
+
+  const normalizedStatus = allowed.has(status) ? status : 'progress';
+  const normalizedPhase = phase || 'other';
 
   const db = loadStore();
   const task = db.tasks.find(x => x.taskId === taskId);
@@ -232,8 +232,8 @@ app.post('/api/worker/event', auth, (req, res) => {
   if (!Array.isArray(task.events)) task.events = [];
   task.events.push({
     workerId,
-    status,
-    phase: phase || 'other',
+    status: normalizedStatus,
+    phase: normalizedPhase,
     message: msg,
     meta: meta || {},
     ts: ts || new Date().toISOString(),
@@ -241,19 +241,20 @@ app.post('/api/worker/event', auth, (req, res) => {
   });
   saveStore(db);
 
-  if (status !== 'keepalive') {
+  const notifyStatuses = new Set(['needs_input', 'review_fail', 'review_loop_fail', 'review_pass', 'escalated', 'completed', 'failed', 'timeout', 'rejected']);
+  if (notifyStatuses.has(normalizedStatus)) {
     notifyTelegram({
       taskId,
       workerId,
-      status,
-      phase: phase || 'other',
+      status: normalizedStatus,
+      phase: normalizedPhase,
       message: msg,
       meta: meta || {},
       ts: ts || new Date().toISOString()
     });
   }
 
-  res.json({ ok: true });
+  res.json({ ok: true, status: normalizedStatus, phase: normalizedPhase, acceptedRawStatus: status });
 });
 
 app.post('/api/task/resume', auth, (req, res) => {
