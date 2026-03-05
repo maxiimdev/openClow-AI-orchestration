@@ -57,7 +57,13 @@ async function notifyTelegram(ev) {
     completed: '✅',
     failed: '❌',
     timeout: '⏱️',
-    rejected: '🚫'
+    rejected: '🚫',
+    needs_input: '❓',
+    review_fail: '⛔',
+    review_loop_fail: '🔁',
+    review_pass: '✅',
+    escalated: '⚠️',
+    resumed: '▶️'
   };
   const phaseIcon = {
     pull: '📥',
@@ -81,7 +87,13 @@ async function notifyTelegram(ev) {
     completed: 'задача выполнена',
     failed: 'ошибка выполнения',
     timeout: 'таймаут выполнения',
-    rejected: 'задача отклонена'
+    rejected: 'задача отклонена',
+    needs_input: 'нужен ответ',
+    review_fail: 'review не прошёл',
+    review_loop_fail: 'нужен patch',
+    review_pass: 'review pass',
+    escalated: 'эскалация',
+    resumed: 'возобновлено'
   }[ev.status] || ev.status;
 
   const phaseRu = {
@@ -205,7 +217,11 @@ app.post('/api/worker/event', auth, (req, res) => {
     return res.status(400).json({ ok: false, error: 'workerId, taskId, status required' });
   }
 
-  const allowed = new Set(['claimed', 'started', 'progress', 'keepalive', 'completed', 'failed', 'timeout', 'rejected']);
+  const allowed = new Set([
+    'claimed', 'started', 'progress', 'keepalive',
+    'completed', 'failed', 'timeout', 'rejected',
+    'needs_input', 'review_fail', 'review_loop_fail', 'review_pass', 'escalated', 'resumed'
+  ]);
   if (!allowed.has(status)) return res.status(400).json({ ok: false, error: 'invalid status' });
 
   const db = loadStore();
