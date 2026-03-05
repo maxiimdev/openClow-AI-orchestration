@@ -1,16 +1,12 @@
-import { mockTasks } from '../../../../lib/mock-data'
+import { listTasks } from '../../../../lib/data-source'
 
-export default defineEventHandler((event) => {
+export default defineEventHandler(async (event) => {
   const auth = event.context.auth!
   const query = getQuery(event)
 
-  // User-scoped: only return tasks owned by the authenticated user
-  let tasks = mockTasks.filter(t => t.userId === auth.userId)
+  const statusFilter = query.status
+    ? String(query.status).split(',')
+    : undefined
 
-  if (query.status) {
-    const statuses = String(query.status).split(',')
-    tasks = tasks.filter(t => statuses.includes(t.status))
-  }
-
-  return { tasks, total: tasks.length }
+  return await listTasks({ userId: auth.userId, statusFilter })
 })

@@ -1,4 +1,4 @@
-import { mockTasks } from '../../../../../lib/mock-data'
+import { resumeTask } from '../../../../../lib/data-source'
 
 const MAX_ANSWER_LENGTH = 5000
 
@@ -22,25 +22,17 @@ export default defineEventHandler(async (event) => {
     throw createError({ statusCode: 400, statusMessage: 'answer_too_long' })
   }
 
-  const task = mockTasks.find(t => t.id === id)
-  if (!task) throw createError({ statusCode: 404, statusMessage: 'Task not found' })
-
-  // User-scoped: deny access to tasks owned by other users
-  if (task.userId !== auth.userId) {
-    throw createError({ statusCode: 404, statusMessage: 'Task not found' })
+  try {
+    const result = await resumeTask(id!, answer, auth.userId)
+    if (!result) {
+      throw createError({ statusCode: 404, statusMessage: 'Task not found' })
+    }
+    return result
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err)
+    if (msg === 'task_not_awaiting_input') {
+      throw createError({ statusCode: 409, statusMessage: 'task_not_awaiting_input' })
+    }
+    throw err
   }
-
-  if (task.status !== 'needs_input') {
-    throw createError({ statusCode: 409, statusMessage: 'task_not_awaiting_input' })
-  }
-
-  // Mock: update task status
-  task.status = 'running'
-  task.internalStatus = 'progress'
-  task.message = `Resumed with answer: ${answer}`
-  task.question = null
-  task.options = null
-  task.needsInputAt = null
-
-  return { ok: true, task }
 })

@@ -1,14 +1,11 @@
-import { mockTasks } from '../../../../lib/mock-data'
+import { getTask } from '../../../../lib/data-source'
 
-export default defineEventHandler((event) => {
+export default defineEventHandler(async (event) => {
   const auth = event.context.auth!
   const id = getRouterParam(event, 'id')
 
-  const task = mockTasks.find(t => t.id === id)
-  if (!task) throw createError({ statusCode: 404, statusMessage: 'Task not found' })
-
-  // User-scoped: deny access to tasks owned by other users
-  if (task.userId !== auth.userId) {
+  const task = await getTask(id!, auth.userId)
+  if (!task) {
     throw createError({ statusCode: 404, statusMessage: 'Task not found' })
   }
 

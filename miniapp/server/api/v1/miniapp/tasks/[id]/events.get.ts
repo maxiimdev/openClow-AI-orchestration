@@ -1,15 +1,13 @@
-import { mockTasks, mockEvents } from '../../../../../lib/mock-data'
+import { getTaskEvents } from '../../../../../lib/data-source'
 
-export default defineEventHandler((event) => {
+export default defineEventHandler(async (event) => {
   const auth = event.context.auth!
   const id = getRouterParam(event, 'id')
 
-  // User-scoped: verify task ownership before returning events
-  const task = mockTasks.find(t => t.id === id)
-  if (!task || task.userId !== auth.userId) {
+  const events = await getTaskEvents(id!, auth.userId)
+  if (events === null) {
     throw createError({ statusCode: 404, statusMessage: 'Task not found' })
   }
 
-  const events = mockEvents[id!] || []
   return { events }
 })
