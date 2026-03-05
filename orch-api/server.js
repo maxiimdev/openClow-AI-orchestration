@@ -205,7 +205,7 @@ app.post('/api/worker/event', auth, (req, res) => {
     return res.status(400).json({ ok: false, error: 'workerId, taskId, status required' });
   }
 
-  const allowed = new Set(['claimed', 'started', 'progress', 'completed', 'failed', 'timeout', 'rejected']);
+  const allowed = new Set(['claimed', 'started', 'progress', 'keepalive', 'completed', 'failed', 'timeout', 'rejected']);
   if (!allowed.has(status)) return res.status(400).json({ ok: false, error: 'invalid status' });
 
   const db = loadStore();
@@ -225,15 +225,17 @@ app.post('/api/worker/event', auth, (req, res) => {
   });
   saveStore(db);
 
-  notifyTelegram({
-    taskId,
-    workerId,
-    status,
-    phase: phase || 'other',
-    message: msg,
-    meta: meta || {},
-    ts: ts || new Date().toISOString()
-  });
+  if (status !== 'keepalive') {
+    notifyTelegram({
+      taskId,
+      workerId,
+      status,
+      phase: phase || 'other',
+      message: msg,
+      meta: meta || {},
+      ts: ts || new Date().toISOString()
+    });
+  }
 
   res.json({ ok: true });
 });
