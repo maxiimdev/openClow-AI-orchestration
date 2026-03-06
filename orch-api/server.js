@@ -318,7 +318,7 @@ app.post('/api/task/resume', auth, (req, res) => {
 });
 
 app.post('/api/worker/result', auth, (req, res) => {
-  const { workerId, taskId, status, output, meta, question, options, context } = req.body || {};
+  const { workerId, taskId, status, output, meta, question, options, context, resultVersion, artifacts } = req.body || {};
   if (!workerId || !taskId || !status) {
     return res.status(400).json({ ok: false, error: 'workerId, taskId, status required' });
   }
@@ -360,7 +360,15 @@ app.post('/api/worker/result', auth, (req, res) => {
       task.needsInputAt = new Date().toISOString();
       task.question = q || null;
       task.options = hasStructuredOptions ? opts : null;
-      task.result = { workerId, status: finalStatus, output: output || {}, meta: meta || {}, context: context || null };
+      task.result = {
+        workerId,
+        status: finalStatus,
+        output: output || {},
+        meta: meta || {},
+        context: context || null,
+        ...(resultVersion != null ? { resultVersion } : {}),
+        ...(Array.isArray(artifacts) ? { artifacts } : {})
+      };
     }
   }
 
@@ -369,11 +377,32 @@ app.post('/api/worker/result', auth, (req, res) => {
     task.question = null;
     task.options = null;
     task.needsInputAt = null;
-    task.result = { workerId, status: finalStatus, output: output || {}, meta: meta || {} };
+    task.result = {
+      workerId,
+      status: finalStatus,
+      output: output || {},
+      meta: meta || {},
+      ...(resultVersion != null ? { resultVersion } : {}),
+      ...(Array.isArray(artifacts) ? { artifacts } : {})
+    };
   }
 
   task.status = finalStatus;
   saveStore(db);
+
+  // Ensure needs_input notifications are sent even when worker reports only via /result
+  // (without a prior /event needs_input status).
+  if (finalStatus === 'needs_input') {
+    notifyTelegram({
+      taskId,
+      workerId,
+      status: finalStatus,
+      phase: 'report',
+      message: task.question || 'needs input',
+      meta: meta || {},
+      ts: new Date().toISOString()
+    });
+  }
 
   res.json({ ok: true, taskId, status: finalStatus });
 });
