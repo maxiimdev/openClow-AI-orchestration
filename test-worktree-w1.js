@@ -146,6 +146,7 @@ server.listen(PORT, () => {
       ALLOWED_REPOS: mockRepoDir,
       CLAUDE_CMD: mockClaudePath,
       POLL_INTERVAL_MS: "200",
+      MAX_PARALLEL_WORKTREES: "1",
       CLAUDE_TIMEOUT_MS: "10000",
       LEASE_TTL_MS: "60000",
       LEASE_RENEW_INTERVAL_MS: "30000",

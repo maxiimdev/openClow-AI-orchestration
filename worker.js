@@ -53,6 +53,8 @@ const CFG = {
     (process.env.DLQ_ENABLED || "true").toLowerCase() === "true",
   idempotencyEnabled:
     (process.env.IDEMPOTENCY_ENABLED || "true").toLowerCase() === "true",
+  // Stage W2: parallel worktree slots
+  maxParallelWorktrees: Math.max(1, int("MAX_PARALLEL_WORKTREES", 2)),
 };
 
 const STDOUT_LIMIT = 200 * 1024;
@@ -200,6 +202,7 @@ function generateIdempotencyKey(taskId, endpoint, suffix) {
 
 // Per-task execution nonce — unique per pull+execute cycle.
 // Used to dedup /result and /event calls for the same task execution.
+// W2: nonces are per-slot to support concurrent tasks.
 let _currentExecutionNonce = null;
 
 function getExecutionNonce(taskId) {
@@ -211,6 +214,82 @@ function getExecutionNonce(taskId) {
 
 function resetExecutionNonce() {
   _currentExecutionNonce = null;
+}
+
+// ── STAGE W2: PER-SLOT CONTEXT ──────────────────────────────────────────────────
+// Each parallel slot gets its own lease timer, execution nonce, and telemetry.
+
+const _activeSlots = new Map(); // slotId → { taskId, promise }
+
+function createSlotContext(slotId) {
+  return {
+    slotId,
+    taskId: null,
+    nonce: null,
+    leaseTimer: null,
+    leaseExpired: false,
+  };
+}
+
+function slotGetNonce(ctx, taskId) {
+  if (!ctx.nonce || ctx.taskId !== taskId) {
+    ctx.taskId = taskId;
+    ctx.nonce = crypto.randomUUID();
+  }
+  return ctx.nonce;
+}
+
+function slotResetNonce(ctx) {
+  ctx.nonce = null;
+  ctx.taskId = null;
+}
+
+function slotStartLease(ctx, taskId) {
+  slotStopLease(ctx);
+  ctx.leaseExpired = false;
+  const renewMs = CFG.leaseRenewIntervalMs;
+  const ttlMs = CFG.leaseTtlMs;
+
+  log("info", "lease-start", { taskId, slotId: ctx.slotId, ttlMs, renewMs });
+
+  ctx.leaseTimer = setInterval(async () => {
+    if (ctx.leaseExpired) return;
+    try {
+      const res = await apiPostRaw("/api/worker/lease-renew", {
+        workerId: CFG.workerId,
+        taskId,
+        leaseTtlMs: ttlMs,
+      });
+      if (res && res.expired) {
+        ctx.leaseExpired = true;
+        log("warn", "lease-expired-server", { taskId, slotId: ctx.slotId });
+        slotStopLease(ctx);
+      } else {
+        log("debug", "lease-renewed", { taskId, slotId: ctx.slotId });
+      }
+    } catch (err) {
+      log("warn", "lease-renew-failed", { taskId, slotId: ctx.slotId, err: err.message });
+    }
+  }, renewMs);
+}
+
+function slotStopLease(ctx) {
+  if (ctx.leaseTimer) {
+    clearInterval(ctx.leaseTimer);
+    ctx.leaseTimer = null;
+  }
+}
+
+function slotIsLeaseExpired(ctx) {
+  return ctx.leaseExpired;
+}
+
+function getSlotTelemetry(slotId) {
+  return {
+    slotId,
+    activeSlots: _activeSlots.size,
+    totalSlots: CFG.maxParallelWorktrees,
+  };
 }
 
 // ── STAGE 5: DEAD-LETTER QUEUE ─────────────────────────────────────────────────
@@ -1727,373 +1806,416 @@ function resetBackoff() {
   backoff = 0;
 }
 
-async function mainLoop() {
-  log("info", "worker started", {
-    allowedRepos: CFG.allowedRepos,
-    pollIntervalMs: CFG.pollIntervalMs,
-  });
+// ── PROCESS TASK (single slot) ──────────────────────────────────────────────────
+// Extracted from mainLoop so it can be run concurrently in parallel slots.
+// `slotCtx` provides per-slot lease/nonce; for single-slot mode (maxParallelWorktrees=1)
+// it falls back to the global lease/nonce functions for full backward compat.
 
-  while (!shuttingDown) {
-    let task = null;
-    let worktreeInfo = null;
-    let originalRepoPath = null;
-    try {
-      // ── PULL ──
-      const pullRes = await apiPost("/api/worker/pull", {
-        workerId: CFG.workerId,
+async function processTask(task, slotCtx) {
+  let worktreeInfo = null;
+  let originalRepoPath = null;
+
+  try {
+    log("info", "task received", { taskId: task.taskId, mode: task.mode, slotId: slotCtx.slotId });
+
+    // Per-slot lease + nonce
+    slotResetNonce(slotCtx);
+    slotGetNonce(slotCtx, task.taskId);
+    slotStartLease(slotCtx, task.taskId);
+
+    await sendEvent(task, "claimed", "pull", "task received", getSlotTelemetry(slotCtx.slotId));
+
+    // ── RESUME CHECK ──
+    if (task.pendingAnswer) {
+      log("info", "task resumed with answer", {
+        taskId: task.taskId,
+        answer: task.pendingAnswer.slice(0, 200),
       });
+      await sendEvent(task, "progress", "report", "task resumed with user input");
+    }
 
-      resetBackoff();
+    // ── VALIDATE ──
+    await sendEvent(task, "started", "validate", "validating task");
+    const errors = validateTask(task);
+    if (errors.length) {
+      log("error", "task validation failed", { taskId: task.taskId, errors });
+      await sendEvent(task, "rejected", "validate", errors.join("; "));
+      await apiPost("/api/worker/result", {
+        workerId: CFG.workerId,
+        taskId: task.taskId,
+        status: "rejected",
+        mode: task.mode,
+        output: { stdout: "", stderr: errors.join("; "), truncated: false },
+        meta: { durationMs: 0, repoPath: task.scope?.repoPath, branch: task.scope?.branch, ...getSlotTelemetry(slotCtx.slotId) },
+      }).catch((e) => log("error", "failed to report rejection", { err: e.message }));
+      return;
+    }
 
-      if (!pullRes.ok) {
-        log("warn", "pull returned ok:false", { body: JSON.stringify(pullRes).slice(0, 300) });
-        await sleep(CFG.pollIntervalMs);
-        continue;
-      }
+    // ── PLAN + STEP TELEMETRY ──
+    const plan = buildPlan(task);
+    const stepTotal = plan.length;
+    const gitStep = (plan.findIndex((s) => s.startsWith("checkout")) + 1) || 2;
+    const claudeStep = (plan.findIndex((s) => s.startsWith("spawn claude")) + 1) || 3;
+    await sendEvent(task, "progress", "plan", `steps: ${plan.join(" → ")}`, {
+      stepIndex: 0,
+      stepTotal,
+      steps: plan,
+      ...getSlotTelemetry(slotCtx.slotId),
+    });
+    await sendEvent(task, "progress", "validate", "validation passed", {
+      stepIndex: 1,
+      stepTotal,
+    });
 
-      if (!pullRes.task) {
-        log("debug", "no tasks");
-        await sleep(CFG.pollIntervalMs);
-        continue;
-      }
-
-      task = pullRes.task;
-      log("info", "task received", { taskId: task.taskId, mode: task.mode });
-
-      // Stage 5: reset execution nonce for idempotency and start lease
-      resetExecutionNonce();
-      getExecutionNonce(task.taskId);
-      startLeaseRenewal(task.taskId);
-
-      await sendEvent(task, "claimed", "pull", "task received");
-
-      // ── RESUME CHECK ──
-      if (task.pendingAnswer) {
-        log("info", "task resumed with answer", {
-          taskId: task.taskId,
-          answer: task.pendingAnswer.slice(0, 200),
+    // ── WORKTREE SETUP ──
+    originalRepoPath = task.scope?.repoPath;
+    if (task.useWorktree && task.scope && task.scope.repoPath) {
+      const baseRepo = path.resolve(task.scope.repoPath);
+      try {
+        const baseCommit = await gitGetBaseCommit(baseRepo);
+        const wtPath = await createWorktree(baseRepo, task.taskId, task.scope.branch);
+        worktreeInfo = {
+          worktreePath: wtPath,
+          branch: task.scope.branch,
+          baseCommit,
+          baseRepoPath: baseRepo,
+        };
+        // Override repoPath so executeTask runs inside the worktree
+        task.scope.repoPath = wtPath;
+        log("info", "worktree created", { taskId: task.taskId, wtPath, baseCommit, branch: task.scope.branch, slotId: slotCtx.slotId });
+        await sendEvent(task, "progress", "worktree", `worktree created at ${wtPath}`, {
+          worktreePath: wtPath,
+          baseCommit,
+          branch: task.scope.branch,
+          ...getSlotTelemetry(slotCtx.slotId),
         });
-        await sendEvent(task, "progress", "report", "task resumed with user input");
-      }
-
-      // ── VALIDATE ──
-      await sendEvent(task, "started", "validate", "validating task");
-      const errors = validateTask(task);
-      if (errors.length) {
-        log("error", "task validation failed", { taskId: task.taskId, errors });
-        await sendEvent(task, "rejected", "validate", errors.join("; "));
+      } catch (wtErr) {
+        log("error", "worktree creation failed", { taskId: task.taskId, err: wtErr.message });
+        await sendEvent(task, "failed", "worktree", `worktree creation failed: ${wtErr.message}`);
         await apiPost("/api/worker/result", {
           workerId: CFG.workerId,
           taskId: task.taskId,
-          status: "rejected",
+          status: "failed",
           mode: task.mode,
-          output: { stdout: "", stderr: errors.join("; "), truncated: false },
-          meta: { durationMs: 0, repoPath: task.scope?.repoPath, branch: task.scope?.branch },
-        }).catch((e) => log("error", "failed to report rejection", { err: e.message }));
-        continue;
+          output: { stdout: "", stderr: `worktree creation failed: ${wtErr.message}`, truncated: false },
+          meta: { durationMs: 0, repoPath: baseRepo, branch: task.scope.branch, ...getSlotTelemetry(slotCtx.slotId) },
+        }).catch((e) => log("error", "failed to report worktree failure", { err: e.message }));
+        return;
       }
+    }
 
-      // ── PLAN + STEP TELEMETRY ──
-      const plan = buildPlan(task);
-      const stepTotal = plan.length;
-      const gitStep = (plan.findIndex((s) => s.startsWith("checkout")) + 1) || 2;
-      const claudeStep = (plan.findIndex((s) => s.startsWith("spawn claude")) + 1) || 3;
-      await sendEvent(task, "progress", "plan", `steps: ${plan.join(" → ")}`, {
-        stepIndex: 0,
-        stepTotal,
-        steps: plan,
-      });
-      await sendEvent(task, "progress", "validate", "validation passed", {
-        stepIndex: 1,
-        stepTotal,
-      });
+    // ── EXECUTE ──
+    const stepCtxMain = { gitStep, claudeStep, stepTotal };
+    let result;
+    if (task.orchestratedLoop) {
+      result = await runOrchestratedLoop(task, stepCtxMain);
+    } else if (task.reviewLoop && task.mode === "review") {
+      result = await runReviewLoop(task, stepCtxMain);
+    } else if (task.isolatedReview && task.mode === "review") {
+      result = await executeIsolatedReview(task, stepCtxMain);
+    } else {
+      result = await executeTask(task, stepCtxMain);
+    }
 
-      // ── WORKTREE SETUP ──
-      originalRepoPath = task.scope?.repoPath;
-      if (task.useWorktree && task.scope && task.scope.repoPath) {
-        const baseRepo = path.resolve(task.scope.repoPath);
-        try {
-          const baseCommit = await gitGetBaseCommit(baseRepo);
-          const wtPath = await createWorktree(baseRepo, task.taskId, task.scope.branch);
-          worktreeInfo = {
-            worktreePath: wtPath,
-            branch: task.scope.branch,
-            baseCommit,
-            baseRepoPath: baseRepo,
-          };
-          // Override repoPath so executeTask runs inside the worktree
-          task.scope.repoPath = wtPath;
-          log("info", "worktree created", { taskId: task.taskId, wtPath, baseCommit, branch: task.scope.branch });
-          await sendEvent(task, "progress", "worktree", `worktree created at ${wtPath}`, {
-            worktreePath: wtPath,
-            baseCommit,
-            branch: task.scope.branch,
-          });
-        } catch (wtErr) {
-          log("error", "worktree creation failed", { taskId: task.taskId, err: wtErr.message });
-          await sendEvent(task, "failed", "worktree", `worktree creation failed: ${wtErr.message}`);
-          await apiPost("/api/worker/result", {
-            workerId: CFG.workerId,
-            taskId: task.taskId,
-            status: "failed",
-            mode: task.mode,
-            output: { stdout: "", stderr: `worktree creation failed: ${wtErr.message}`, truncated: false },
-            meta: { durationMs: 0, repoPath: baseRepo, branch: task.scope.branch },
-          }).catch((e) => log("error", "failed to report worktree failure", { err: e.message }));
-          continue;
-        }
-      }
+    // Attach worktree metadata to result
+    if (worktreeInfo) {
+      result.meta.worktreePath = worktreeInfo.worktreePath;
+      result.meta.baseCommit = worktreeInfo.baseCommit;
+      result.meta.worktreeBranch = worktreeInfo.branch;
+    }
 
-      // ── EXECUTE ──
-      const stepCtxMain = { gitStep, claudeStep, stepTotal };
-      let result;
-      if (task.orchestratedLoop) {
-        result = await runOrchestratedLoop(task, stepCtxMain);
-      } else if (task.reviewLoop && task.mode === "review") {
-        result = await runReviewLoop(task, stepCtxMain);
-      } else if (task.isolatedReview && task.mode === "review") {
-        result = await executeIsolatedReview(task, stepCtxMain);
-      } else {
-        result = await executeTask(task, stepCtxMain);
-      }
+    // Attach slot telemetry to result
+    Object.assign(result.meta, getSlotTelemetry(slotCtx.slotId));
 
-      // Attach worktree metadata to result
-      if (worktreeInfo) {
-        result.meta.worktreePath = worktreeInfo.worktreePath;
-        result.meta.baseCommit = worktreeInfo.baseCommit;
-        result.meta.worktreeBranch = worktreeInfo.branch;
-      }
-
-      // ── LEASE CHECK (Stage 5) ──
-      // If lease expired during execution, abort reporting — another worker may
-      // have reclaimed this task. Log and move on.
-      if (isLeaseExpired()) {
-        log("warn", "lease-expired-abort", {
-          taskId: task.taskId,
-          status: result.status,
-          msg: "lease expired during execution; skipping result report",
-        });
-        await sendEvent(task, "failed", "lease", "lease expired during execution — result discarded");
-        stopLeaseRenewal();
-        resetExecutionNonce();
-        continue;
-      }
-
-      // ── NEEDS_INPUT CHECK ──
-      // Only structured asks (explicit [NEEDS_INPUT] marker with question field,
-      // or AskUserQuestion tool) can trigger needs_input. Heuristics removed.
-      let ni = null;
-      if (result.status === "completed") {
-        ni = parseNeedsInput(result.output.stdout);
-
-        // Debug: pre-decision introspection
-        if (CFG.needsInputDebug) {
-          const _hasPd = result.output.stdout.includes('"permission_denials"');
-          const _hasAuq = result.output.stdout.includes('"AskUserQuestion"');
-          log("debug", "[ni] pre-decision", {
-            taskId: task.taskId,
-            exitCode: result.meta.exitCode,
-            hasPermissionDenials: _hasPd,
-            hasAskUserQuestion: _hasAuq,
-            parseNeedsInputFound: ni !== null,
-            sourceType: ni?.sourceType || null,
-            isStructuredAsk: ni?.isStructuredAsk || false,
-            questionPreview: ni ? (ni.question || "").slice(0, 80) : null,
-          });
-        }
-
-        if (ni && ni.isStructuredAsk && ni.question) {
-          result.status = "needs_input";
-          result.meta.question = ni.question;
-          result.meta.options = ni.options;
-          result.meta.context = ni.context;
-          result.meta.needsInputAt = new Date().toISOString();
-          log("info", "needs_input detected", {
-            taskId: task.taskId,
-            sourceType: ni.sourceType,
-            isStructuredAsk: ni.isStructuredAsk,
-            hasOptions: !!(ni.options && ni.options.length),
-            questionPreview: (ni.question || "").slice(0, 100),
-          });
-        } else if (ni) {
-          log("info", "needs_input candidate rejected: not a structured ask", {
-            taskId: task.taskId,
-            sourceType: ni.sourceType,
-            isStructuredAsk: false,
-          });
-          ni = null; // clear so downstream gates don't fire
-        }
-      }
-
-      // ── REVIEW GATE ──
-      // For review mode, completed is never valid — must be review_pass or review_fail.
-      // reviewLoop and orchestratedLoop tasks have already been handled above.
-      if (task.mode === "review" && !task.reviewLoop && !task.orchestratedLoop && result.status === "completed") {
-        const rv = parseReviewVerdict(result.output.stdout);
-        result.meta.reviewVerdict = rv.verdict;
-        if (rv.verdict === "pass") {
-          result.status = "review_pass";
-        } else {
-          result.status = "review_fail";
-          result.meta.reviewSeverity = rv.severity;
-          result.meta.reviewFindings = rv.findings;
-          result.meta.structuredFindings = rv.structuredFindings || null;
-        }
-        log("info", "review verdict parsed", {
-          taskId: task.taskId,
-          verdict: rv.verdict,
-          severity: rv.severity || null,
-        });
-      }
-
-      // Hard safety gate: if review mode (non-loop) still shows completed (should never happen),
-      // force review_fail. Completion is impossible without an explicit REVIEW_PASS marker.
-      if (task.mode === "review" && !task.reviewLoop && !task.orchestratedLoop && result.status === "completed") {
-        log("error", "review-gate violation: completed status blocked for review mode", {
-          taskId: task.taskId,
-        });
-        result.status = "review_fail";
-        result.meta.reviewVerdict = "fail";
-        result.meta.reviewSeverity = "unknown";
-        result.meta.reviewFindings = "Review gate enforced: completed status not allowed for review mode tasks.";
-      }
-
-      // ── HARD REVIEW GATE (Stage 2) ──
-      // Invariant: if task.requireReviewGate, enforce pipeline constraints.
-      // Must run after all status transformations (needs_input, review verdict parsing).
-      enforceReviewGate(task, result);
-      if (result.meta.reviewGateEnforced) {
-        await sendEvent(task, result.status, "review_gate",
-          `review gate enforced: ${result.meta.reviewGateReason}`,
-          { reviewGateEnforced: true, reviewGateReason: result.meta.reviewGateReason }
-        );
-      }
-
-      log("info", "task done", {
+    // ── LEASE CHECK (Stage 5) ──
+    if (slotIsLeaseExpired(slotCtx)) {
+      log("warn", "lease-expired-abort", {
         taskId: task.taskId,
         status: result.status,
-        durationMs: result.meta.durationMs,
-        reviewGateEnforced: result.meta.reviewGateEnforced || false,
+        slotId: slotCtx.slotId,
+        msg: "lease expired during execution; skipping result report",
       });
+      await sendEvent(task, "failed", "lease", "lease expired during execution — result discarded");
+      slotStopLease(slotCtx);
+      slotResetNonce(slotCtx);
+      return;
+    }
 
-      if (result.status === "needs_input" && ni && ni.isStructuredAsk && ni.question) {
-        await sendEvent(
-          task, "needs_input", "claude",
-          `needs input: ${result.meta.question || "(no question)"}`,
-          result.meta
-        );
-      } else if (result.status === "needs_input") {
-        // Defense-in-depth: status was set to needs_input but structured ask
-        // validation failed at the event gate. Demote to completed to prevent
-        // false notifications reaching Telegram/orchestrator.
-        log("error", "needs_input event gate blocked: status was needs_input but ni guard failed", {
+    // ── NEEDS_INPUT CHECK ──
+    let ni = null;
+    if (result.status === "completed") {
+      ni = parseNeedsInput(result.output.stdout);
+
+      if (CFG.needsInputDebug) {
+        const _hasPd = result.output.stdout.includes('"permission_denials"');
+        const _hasAuq = result.output.stdout.includes('"AskUserQuestion"');
+        log("debug", "[ni] pre-decision", {
           taskId: task.taskId,
-          niPresent: !!ni,
+          exitCode: result.meta.exitCode,
+          hasPermissionDenials: _hasPd,
+          hasAskUserQuestion: _hasAuq,
+          parseNeedsInputFound: ni !== null,
+          sourceType: ni?.sourceType || null,
           isStructuredAsk: ni?.isStructuredAsk || false,
-          question: ni?.question || null,
+          questionPreview: ni ? (ni.question || "").slice(0, 80) : null,
         });
-        result.status = "completed";
-        await sendEvent(task, "completed", "report", "task completed", result.meta);
-      } else if (result.status === "review_pass") {
-        const iterInfo = result.meta.reviewIteration
-          ? ` (iter ${result.meta.reviewIteration}/${result.meta.reviewMaxIterations})`
-          : "";
-        await sendEvent(task, "review_pass", "report", `review passed${iterInfo}`, result.meta);
-      } else if (result.status === "review_fail") {
-        const sev = result.meta.reviewSeverity || "unknown";
-        const summary = (result.meta.reviewFindings || "").slice(0, 200);
-        await sendEvent(task, "review_fail", "report", `review failed (${sev}): ${summary}`, result.meta);
-      } else if (result.status === "escalated") {
-        const iter = result.meta.reviewIteration || "?";
-        const maxIter = result.meta.reviewMaxIterations || "?";
-        const reason = result.meta.escalationReason || "max iterations reached";
-        await sendEvent(task, "escalated", "report",
-          `review loop escalated after ${iter}/${maxIter} iterations: ${reason}`,
-          result.meta
-        );
-      } else if (result.status === "completed") {
-        await sendEvent(task, "completed", "report", "task completed", result.meta);
-      } else if (result.status === "timeout") {
-        await sendEvent(task, "timeout", "claude", "claude process timed out", result.meta);
+      }
+
+      if (ni && ni.isStructuredAsk && ni.question) {
+        result.status = "needs_input";
+        result.meta.question = ni.question;
+        result.meta.options = ni.options;
+        result.meta.context = ni.context;
+        result.meta.needsInputAt = new Date().toISOString();
+        log("info", "needs_input detected", {
+          taskId: task.taskId,
+          sourceType: ni.sourceType,
+          isStructuredAsk: ni.isStructuredAsk,
+          hasOptions: !!(ni.options && ni.options.length),
+          questionPreview: (ni.question || "").slice(0, 100),
+        });
+      } else if (ni) {
+        log("info", "needs_input candidate rejected: not a structured ask", {
+          taskId: task.taskId,
+          sourceType: ni.sourceType,
+          isStructuredAsk: false,
+        });
+        ni = null;
+      }
+    }
+
+    // ── REVIEW GATE ──
+    if (task.mode === "review" && !task.reviewLoop && !task.orchestratedLoop && result.status === "completed") {
+      const rv = parseReviewVerdict(result.output.stdout);
+      result.meta.reviewVerdict = rv.verdict;
+      if (rv.verdict === "pass") {
+        result.status = "review_pass";
       } else {
-        await sendEvent(task, "failed", "report", "task failed", result.meta);
+        result.status = "review_fail";
+        result.meta.reviewSeverity = rv.severity;
+        result.meta.reviewFindings = rv.findings;
+        result.meta.structuredFindings = rv.structuredFindings || null;
       }
-
-      // ── REPORT ──
-      await sendEvent(task, "progress", "report", "reporting result", {
-        stepIndex: stepTotal,
-        stepTotal,
-      });
-      // Build v2 result: persist artifacts + truncate inline output
-      const v2 = buildV2Output(task.taskId, result.output);
-      const resultBody = {
-        resultVersion: 2,
-        workerId: CFG.workerId,
+      log("info", "review verdict parsed", {
         taskId: task.taskId,
-        status: result.status,
-        mode: task.mode,
-        output: v2.output,
-        artifacts: v2.artifacts,
-        meta: result.meta,
-      };
-      // For needs_input: hoist question/options/context to top-level so the
-      // orchestrator can store them directly on task.question / task.options
-      // without having to dig into meta. meta fields are preserved for compat.
-      if (result.status === "needs_input" && ni && ni.isStructuredAsk) {
-        resultBody.question = result.meta.question ?? null;
-        resultBody.options = result.meta.options ?? null;
-        resultBody.context = result.meta.context ?? null;
-        resultBody.needsInputAt = result.meta.needsInputAt ?? null;
-      }
-      // For review_fail and escalated: hoist structuredFindings to top-level so the
-      // orchestrator can pass them directly to the next patch task.
-      if (result.status === "review_fail" || result.status === "escalated") {
-        resultBody.structuredFindings = result.meta?.structuredFindings ?? null;
-        resultBody.reviewFindings = result.meta?.reviewFindings ?? null;
-      }
-      await apiPost("/api/worker/result", resultBody);
+        verdict: rv.verdict,
+        severity: rv.severity || null,
+      });
+    }
 
-      // ── WORKTREE CLEANUP ──
-      if (worktreeInfo && !task.keepWorktree) {
-        // Restore original repoPath before cleanup
-        task.scope.repoPath = originalRepoPath;
-        await removeWorktree(worktreeInfo.baseRepoPath, task.taskId);
-        log("info", "worktree removed", { taskId: task.taskId, wtPath: worktreeInfo.worktreePath });
-      } else if (worktreeInfo && task.keepWorktree) {
-        log("info", "worktree kept (keepWorktree=true)", { taskId: task.taskId, wtPath: worktreeInfo.worktreePath });
-      }
+    // Hard safety gate
+    if (task.mode === "review" && !task.reviewLoop && !task.orchestratedLoop && result.status === "completed") {
+      log("error", "review-gate violation: completed status blocked for review mode", {
+        taskId: task.taskId,
+      });
+      result.status = "review_fail";
+      result.meta.reviewVerdict = "fail";
+      result.meta.reviewSeverity = "unknown";
+      result.meta.reviewFindings = "Review gate enforced: completed status not allowed for review mode tasks.";
+    }
 
-      // Stage 5: clean up lease + nonce
-      stopLeaseRenewal();
-      resetExecutionNonce();
+    // ── HARD REVIEW GATE (Stage 2) ──
+    enforceReviewGate(task, result);
+    if (result.meta.reviewGateEnforced) {
+      await sendEvent(task, result.status, "review_gate",
+        `review gate enforced: ${result.meta.reviewGateReason}`,
+        { reviewGateEnforced: true, reviewGateReason: result.meta.reviewGateReason }
+      );
+    }
 
+    log("info", "task done", {
+      taskId: task.taskId,
+      status: result.status,
+      durationMs: result.meta.durationMs,
+      slotId: slotCtx.slotId,
+      reviewGateEnforced: result.meta.reviewGateEnforced || false,
+    });
+
+    if (result.status === "needs_input" && ni && ni.isStructuredAsk && ni.question) {
+      await sendEvent(
+        task, "needs_input", "claude",
+        `needs input: ${result.meta.question || "(no question)"}`,
+        result.meta
+      );
+    } else if (result.status === "needs_input") {
+      log("error", "needs_input event gate blocked: status was needs_input but ni guard failed", {
+        taskId: task.taskId,
+        niPresent: !!ni,
+        isStructuredAsk: ni?.isStructuredAsk || false,
+        question: ni?.question || null,
+      });
+      result.status = "completed";
+      await sendEvent(task, "completed", "report", "task completed", result.meta);
+    } else if (result.status === "review_pass") {
+      const iterInfo = result.meta.reviewIteration
+        ? ` (iter ${result.meta.reviewIteration}/${result.meta.reviewMaxIterations})`
+        : "";
+      await sendEvent(task, "review_pass", "report", `review passed${iterInfo}`, result.meta);
+    } else if (result.status === "review_fail") {
+      const sev = result.meta.reviewSeverity || "unknown";
+      const summary = (result.meta.reviewFindings || "").slice(0, 200);
+      await sendEvent(task, "review_fail", "report", `review failed (${sev}): ${summary}`, result.meta);
+    } else if (result.status === "escalated") {
+      const iter = result.meta.reviewIteration || "?";
+      const maxIter = result.meta.reviewMaxIterations || "?";
+      const reason = result.meta.escalationReason || "max iterations reached";
+      await sendEvent(task, "escalated", "report",
+        `review loop escalated after ${iter}/${maxIter} iterations: ${reason}`,
+        result.meta
+      );
+    } else if (result.status === "completed") {
+      await sendEvent(task, "completed", "report", "task completed", result.meta);
+    } else if (result.status === "timeout") {
+      await sendEvent(task, "timeout", "claude", "claude process timed out", result.meta);
+    } else {
+      await sendEvent(task, "failed", "report", "task failed", result.meta);
+    }
+
+    // ── REPORT ──
+    await sendEvent(task, "progress", "report", "reporting result", {
+      stepIndex: stepTotal,
+      stepTotal,
+      ...getSlotTelemetry(slotCtx.slotId),
+    });
+    const v2 = buildV2Output(task.taskId, result.output);
+    const resultBody = {
+      resultVersion: 2,
+      workerId: CFG.workerId,
+      taskId: task.taskId,
+      status: result.status,
+      mode: task.mode,
+      output: v2.output,
+      artifacts: v2.artifacts,
+      meta: result.meta,
+    };
+    if (result.status === "needs_input" && ni && ni.isStructuredAsk) {
+      resultBody.question = result.meta.question ?? null;
+      resultBody.options = result.meta.options ?? null;
+      resultBody.context = result.meta.context ?? null;
+      resultBody.needsInputAt = result.meta.needsInputAt ?? null;
+    }
+    if (result.status === "review_fail" || result.status === "escalated") {
+      resultBody.structuredFindings = result.meta?.structuredFindings ?? null;
+      resultBody.reviewFindings = result.meta?.reviewFindings ?? null;
+    }
+    await apiPost("/api/worker/result", resultBody);
+
+    // ── WORKTREE CLEANUP ──
+    if (worktreeInfo && !task.keepWorktree) {
+      task.scope.repoPath = originalRepoPath;
+      await removeWorktree(worktreeInfo.baseRepoPath, task.taskId);
+      log("info", "worktree removed", { taskId: task.taskId, wtPath: worktreeInfo.worktreePath });
+    } else if (worktreeInfo && task.keepWorktree) {
+      log("info", "worktree kept (keepWorktree=true)", { taskId: task.taskId, wtPath: worktreeInfo.worktreePath });
+    }
+
+    // Clean up slot lease + nonce
+    slotStopLease(slotCtx);
+    slotResetNonce(slotCtx);
+
+    resetBackoff();
+  } catch (err) {
+    // Worktree cleanup on error
+    if (worktreeInfo && !task?.keepWorktree) {
+      try { if (originalRepoPath) task.scope.repoPath = originalRepoPath; } catch (_) {}
+      await removeWorktree(worktreeInfo.baseRepoPath, task.taskId).catch((wtErr) =>
+        log("warn", "worktree cleanup failed in error handler", { err: wtErr.message })
+      );
+    }
+
+    slotStopLease(slotCtx);
+    slotResetNonce(slotCtx);
+
+    const delay = nextBackoff();
+    log("error", "slot error", { err: err.message, slotId: slotCtx.slotId, taskId: task?.taskId, nextRetryMs: delay });
+
+    if (task && !isTransientError(err)) {
+      log("error", "fatal-error-dlq", { taskId: task.taskId, err: err.message });
+      await sendToDeadLetter(task, err, 0, "fatal error in slot");
+      await sendEvent(task, "failed", "dlq", `dead-lettered: ${err.message}`);
+    } else if (task) {
+      await sendEvent(task, "failed", "other", err.message);
+    }
+  }
+}
+
+// ── SCHEDULER (Stage W2) ────────────────────────────────────────────────────────
+// Polls for tasks and dispatches them to free slots. Each slot runs processTask()
+// concurrently. When maxParallelWorktrees=1, behavior is identical to pre-W2
+// sequential mainLoop.
+
+async function mainLoop() {
+  const totalSlots = CFG.maxParallelWorktrees;
+  log("info", "worker started", {
+    allowedRepos: CFG.allowedRepos,
+    pollIntervalMs: CFG.pollIntervalMs,
+    maxParallelWorktrees: totalSlots,
+  });
+
+  while (!shuttingDown) {
+    // If all slots busy, wait for any to finish
+    if (_activeSlots.size >= totalSlots) {
+      await Promise.race([..._activeSlots.values()].map((s) => s.promise));
+      continue; // re-check after a slot frees up
+    }
+
+    // ── PULL ──
+    let pullRes;
+    try {
+      pullRes = await apiPost("/api/worker/pull", {
+        workerId: CFG.workerId,
+        availableSlots: totalSlots - _activeSlots.size,
+      });
       resetBackoff();
     } catch (err) {
-      // Worktree cleanup on error
-      if (worktreeInfo && !task.keepWorktree) {
-        try { task.scope.repoPath = originalRepoPath; } catch (_) {}
-        await removeWorktree(worktreeInfo.baseRepoPath, task.taskId).catch((wtErr) =>
-          log("warn", "worktree cleanup failed in error handler", { err: wtErr.message })
-        );
-      }
-
-      // Stage 5: stop lease on error
-      stopLeaseRenewal();
-      resetExecutionNonce();
-
       const delay = nextBackoff();
-      log("error", "loop error", { err: err.message, nextRetryMs: delay });
-
-      // Stage 5: DLQ for fatal errors (non-transient or exhausted retries)
-      if (task && !isTransientError(err)) {
-        log("error", "fatal-error-dlq", { taskId: task.taskId, err: err.message });
-        await sendToDeadLetter(task, err, 0, "fatal error in main loop");
-        await sendEvent(task, "failed", "dlq", `dead-lettered: ${err.message}`);
-      } else if (task) {
-        await sendEvent(task, "failed", "other", err.message);
-      }
+      log("error", "pull error", { err: err.message, nextRetryMs: delay });
       await sleep(delay);
+      continue;
     }
+
+    if (!pullRes.ok) {
+      log("warn", "pull returned ok:false", { body: JSON.stringify(pullRes).slice(0, 300) });
+      await sleep(CFG.pollIntervalMs);
+      continue;
+    }
+
+    if (!pullRes.task) {
+      log("debug", "no tasks", { activeSlots: _activeSlots.size, totalSlots });
+      // If slots are busy, race on them finishing vs poll interval
+      if (_activeSlots.size > 0) {
+        await Promise.race([
+          sleep(CFG.pollIntervalMs),
+          ...[..._activeSlots.values()].map((s) => s.promise),
+        ]);
+      } else {
+        await sleep(CFG.pollIntervalMs);
+      }
+      continue;
+    }
+
+    const task = pullRes.task;
+    const slotId = `slot-${task.taskId}`;
+    const slotCtx = createSlotContext(slotId);
+
+    // Launch task in a slot
+    const slotPromise = processTask(task, slotCtx).finally(() => {
+      _activeSlots.delete(slotId);
+      log("debug", "slot freed", { slotId, activeSlots: _activeSlots.size, totalSlots });
+    });
+
+    _activeSlots.set(slotId, { taskId: task.taskId, promise: slotPromise });
+    log("info", "slot assigned", { slotId, taskId: task.taskId, activeSlots: _activeSlots.size, totalSlots });
+  }
+
+  // ── GRACEFUL SHUTDOWN: drain in-flight tasks ──
+  if (_activeSlots.size > 0) {
+    log("info", "graceful-shutdown: waiting for in-flight tasks", {
+      activeSlots: _activeSlots.size,
+      taskIds: [..._activeSlots.values()].map((s) => s.taskId),
+    });
+    await Promise.allSettled([..._activeSlots.values()].map((s) => s.promise));
+    log("info", "graceful-shutdown: all slots drained");
   }
 
   log("info", "worker stopped");

@@ -943,6 +943,7 @@ server.listen(PORT, () => {
       CLAUDE_TIMEOUT_MS: "30000",
       CLAUDE_BYPASS_PERMISSIONS: "false",
       NEEDS_INPUT_DEBUG: "true",
+      MAX_PARALLEL_WORKTREES: "1",
     },
     stdio: "inherit",
   });

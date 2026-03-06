@@ -154,6 +154,7 @@ function spawnWorker(envOverrides = {}) {
     WORKER_ID: "test-worker-s5",
     ALLOWED_REPOS: mockRepoDir,
     POLL_INTERVAL_MS: "200",
+    MAX_PARALLEL_WORKTREES: "1",
     CLAUDE_CMD: mockClaudePath,
     CLAUDE_TIMEOUT_MS: "10000",
     CLAUDE_BYPASS_PERMISSIONS: "true",

@@ -358,6 +358,7 @@ server.listen(PORT, () => {
       WORKER_TOKEN: "test-token",
       WORKER_ID: "test-worker-rg",
       POLL_INTERVAL_MS: "1000",
+      MAX_PARALLEL_WORKTREES: "1",
       CLAUDE_CMD: mockClaudePath,
       ALLOWED_REPOS: mockRepoDir,
       CLAUDE_TIMEOUT_MS: "30000",

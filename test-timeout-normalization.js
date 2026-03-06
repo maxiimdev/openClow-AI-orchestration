@@ -101,6 +101,7 @@ function runScenario({ port, task, workerEnv, afterResultMs = 600 }) {
           WORKER_TOKEN:              "test-token",
           WORKER_ID:                 `test-worker-${port}`,
           POLL_INTERVAL_MS:          "300",
+          MAX_PARALLEL_WORKTREES:    "1",
           CLAUDE_BYPASS_PERMISSIONS: "false",
           ...workerEnv,
         },
