@@ -67,6 +67,11 @@ const CFG = {
   reportMinLength: int("REPORT_MIN_LENGTH", 50),
   reportRetryEnabled:
     (process.env.REPORT_RETRY_ENABLED || "false").toLowerCase() === "true",
+  // Report schema validation (strict structured-report checks)
+  reportSchemaStrict:
+    (process.env.REPORT_SCHEMA_STRICT || "false").toLowerCase() === "true",
+  reportSchemaRetryEnabled:
+    (process.env.REPORT_SCHEMA_RETRY_ENABLED || "false").toLowerCase() === "true",
   // Feature branch + PR workflow policy
   featureBranchPerTask:
     (process.env.FEATURE_BRANCH_PER_TASK || "true").toLowerCase() === "true",
@@ -808,6 +813,80 @@ function validateReportContract(stdout, task) {
   }
 
   return null; // valid
+}
+
+// ── REPORT SCHEMA VALIDATION ────────────────────────────────────────────────
+// Structured report schemas by task intent. Each schema lists required section
+// headings (case-insensitive) that must appear in the report text.
+
+const REPORT_SCHEMAS = {
+  strict: {
+    label: "strict",
+    sections: [
+      { key: "changelog", pattern: /changelog|files?\s*changed|file.level\s*change/i, description: "file-level changelog" },
+      { key: "evidence",  pattern: /evidence|commands?\s*run|proof|verification/i, description: "evidence/commands" },
+      { key: "tests",     pattern: /test\s*summary|test\s*results?|tests?\s*pass/i, description: "test summary" },
+      { key: "commit",    pattern: /commit\s*hash|commit[:\s]+[0-9a-f]{7}/i, description: "commit hash" },
+    ],
+  },
+  standard: {
+    label: "standard",
+    sections: [
+      { key: "changelog", pattern: /changelog|files?\s*changed|file.level\s*change/i, description: "file-level changelog" },
+      { key: "tests",     pattern: /test\s*summary|test\s*results?|tests?\s*pass/i, description: "test summary" },
+    ],
+  },
+  compact: {
+    label: "compact",
+    sections: [], // no structured sections required
+  },
+};
+
+// Task intent patterns that auto-select strict schema when REPORT_SCHEMA_STRICT is on
+const STRICT_TASK_PATTERNS = [
+  /audit/i, /foundation/i, /hardening/i, /refactor/i, /migration/i,
+];
+
+function resolveReportSchema(task) {
+  // 1. Explicit per-task override
+  if (task.reportSchema && REPORT_SCHEMAS[task.reportSchema]) {
+    return REPORT_SCHEMAS[task.reportSchema];
+  }
+  // 2. Global strict mode: auto-detect from task intent
+  if (CFG.reportSchemaStrict) {
+    const text = `${task.instructions || ""} ${task.taskId || ""}`;
+    for (const re of STRICT_TASK_PATTERNS) {
+      if (re.test(text)) return REPORT_SCHEMAS.strict;
+    }
+    // Default to standard when strict mode is on but task doesn't match strict patterns
+    return REPORT_SCHEMAS.standard;
+  }
+  // 3. No schema enforcement
+  return null;
+}
+
+function validateReportSchema(stdout, task) {
+  const schema = resolveReportSchema(task);
+  if (!schema || schema.sections.length === 0) return null;
+
+  const resultText = extractClaudeResult(stdout);
+  if (!resultText) return null; // empty result is caught by validateReportContract
+
+  const missing = [];
+  for (const sec of schema.sections) {
+    if (!sec.pattern.test(resultText)) {
+      missing.push({ key: sec.key, description: sec.description });
+    }
+  }
+
+  if (missing.length === 0) return null;
+
+  return {
+    reason: "schema_violation",
+    schema: schema.label,
+    missing,
+    message: `Report schema violation (${schema.label}): missing sections: ${missing.map(m => m.key).join(", ")}`,
+  };
 }
 
 function normalizeOptions(raw) {
@@ -3139,6 +3218,56 @@ async function processTask(task, slotCtx) {
           result.status = "failed";
           result.meta.failureReason = "report_contract_violation";
           result.meta.reportContractViolation = violation;
+        }
+      }
+    }
+
+    // ── REPORT SCHEMA GUARDRAIL ──
+    if (result.status === "completed") {
+      const schemaViolation = validateReportSchema(result.output.stdout, task);
+      if (schemaViolation) {
+        log("warn", "report_schema_invalid", {
+          taskId: task.taskId,
+          schema: schemaViolation.schema,
+          missing: schemaViolation.missing.map(m => m.key),
+        });
+        await sendEvent(task, "report_schema_invalid", "report_contract",
+          schemaViolation.message,
+          { schema: schemaViolation.schema, missing: schemaViolation.missing }
+        );
+
+        let schemaRetried = false;
+        if (CFG.reportSchemaRetryEnabled && task.reportSchemaRetryOnViolation !== false) {
+          log("info", "report_schema_retry", { taskId: task.taskId });
+          const missingList = schemaViolation.missing.map(m => m.description).join(", ");
+          await sendEvent(task, "report_schema_retry_attempt", "report_contract",
+            "Retrying task after schema violation",
+            { originalSchema: schemaViolation.schema, missing: schemaViolation.missing }
+          );
+          const schemaRetryTask = {
+            ...task,
+            _isolatedPrompt: buildPrompt(task) +
+              `\n\nIMPORTANT: Your previous report was rejected because it is missing required sections: ${missingList}. ` +
+              "You MUST include ALL required sections in your report: file-level changelog, evidence/commands run, test summary, and commit hash.",
+          };
+          const schemaRetryResult = await executeTask(schemaRetryTask, stepCtxMain);
+          const retrySchemaViolation = validateReportSchema(schemaRetryResult.output.stdout, task);
+          if (!retrySchemaViolation) {
+            log("info", "report_schema_retry_success", { taskId: task.taskId });
+            result = schemaRetryResult;
+            schemaRetried = true;
+          } else {
+            log("warn", "report_schema_retry_failed", {
+              taskId: task.taskId,
+              missing: retrySchemaViolation.missing.map(m => m.key),
+            });
+          }
+        }
+
+        if (!schemaRetried) {
+          result.status = "failed";
+          result.meta.failureReason = "report_contract_violation";
+          result.meta.reportSchemaViolation = schemaViolation;
         }
       }
     }
