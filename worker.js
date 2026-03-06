@@ -61,6 +61,12 @@ const CFG = {
   worktreeDiskThresholdBytes: int("WORKTREE_DISK_THRESHOLD_BYTES", 5 * 1024 * 1024 * 1024), // 5GB
   worktreeDiskHardStop: (process.env.WORKTREE_DISK_HARD_STOP || "false").toLowerCase() === "true",
   worktreeRecoveryEnabled: (process.env.WORKTREE_RECOVERY_ENABLED || "true").toLowerCase() === "true",
+  // Report contract guardrails
+  reportContractEnabled:
+    (process.env.REPORT_CONTRACT_ENABLED || "false").toLowerCase() === "true",
+  reportMinLength: int("REPORT_MIN_LENGTH", 50),
+  reportRetryEnabled:
+    (process.env.REPORT_RETRY_ENABLED || "false").toLowerCase() === "true",
 };
 
 const STDOUT_LIMIT = 200 * 1024;
@@ -74,6 +80,20 @@ const NEEDS_INPUT_ANCHORED_RE = /^[ \t]*\[NEEDS_INPUT\]([\s\S]*?)\[\/NEEDS_INPUT
 const REVIEW_PASS_RE = /\[REVIEW_PASS\]/i;
 const REVIEW_FAIL_RE = /\[REVIEW_FAIL(?:\s+severity=([^\]]+))?\]([\s\S]*?)\[\/REVIEW_FAIL\]/i;
 const REVIEW_FINDINGS_JSON_RE = /\[REVIEW_FINDINGS_JSON\]([\s\S]*?)\[\/REVIEW_FINDINGS_JSON\]/i;
+
+// ── REPORT CONTRACT ──────────────────────────────────────────────────────────
+const REPORT_PLACEHOLDER_PATTERNS = [
+  /^acknowledged\.?\s*(all done\.?)?$/i,
+  /^done\.?$/i,
+  /^ok\.?$/i,
+  /^completed\.?$/i,
+  /^task completed\.?$/i,
+  /^task completed successfully\.?$/i,
+  /^understood\.?\s*(proceeding\.?)?$/i,
+  /^will do\.?$/i,
+  /^sure\.?$/i,
+  /^no (?:issues|problems) found\.?$/i,
+];
 
 // ── HARD REVIEW GATE ──────────────────────────────────────────────────────────
 // State transition table: defines valid terminal statuses per mode.
@@ -732,6 +752,56 @@ function extractClaudeResult(stdout) {
     if (typeof obj.result === "string") return obj.result;
   } catch { /* not JSON */ }
   return null;
+}
+
+// ── REPORT CONTRACT VALIDATION ───────────────────────────────────────────────
+
+function validateReportContract(stdout, task) {
+  // Skip validation for modes that intentionally produce short output
+  if (task.mode === "dry_run" || task.mode === "tests") return null;
+  // Explicit opt-out
+  if (task.allowShortReport) return null;
+  // Only validate when contract is enabled
+  if (!CFG.reportContractEnabled) return null;
+
+  const resultText = extractClaudeResult(stdout);
+
+  // Rule 1: empty result
+  if (resultText === null || resultText.trim() === "") {
+    return {
+      reason: "empty_result",
+      message: "Report contract violation: result is empty",
+      length: resultText ? resultText.length : 0,
+      pattern: null,
+    };
+  }
+
+  const trimmed = resultText.trim();
+
+  // Rule 2: placeholder pattern match
+  for (const re of REPORT_PLACEHOLDER_PATTERNS) {
+    if (re.test(trimmed)) {
+      return {
+        reason: "placeholder_match",
+        message: `Report contract violation: result matches placeholder pattern: ${re.source}`,
+        length: trimmed.length,
+        pattern: re.source,
+      };
+    }
+  }
+
+  // Rule 3: below minimum useful length
+  const minLen = task.reportMinLength || CFG.reportMinLength;
+  if (trimmed.length < minLen) {
+    return {
+      reason: "below_min_length",
+      message: `Report contract violation: result length ${trimmed.length} < minimum ${minLen}`,
+      length: trimmed.length,
+      pattern: null,
+    };
+  }
+
+  return null; // valid
 }
 
 function normalizeOptions(raw) {
@@ -2870,6 +2940,56 @@ async function processTask(task, slotCtx) {
           mergeConflictCheck: result.meta.mergeConflictCheck || null,
         }
       );
+    }
+
+    // ── REPORT CONTRACT GUARDRAIL ──
+    if (result.status === "completed") {
+      const violation = validateReportContract(result.output.stdout, task);
+      if (violation) {
+        log("warn", "report_contract_violation", {
+          taskId: task.taskId,
+          reason: violation.reason,
+          length: violation.length,
+          pattern: violation.pattern,
+        });
+        await sendEvent(task, "report_contract_invalid", "report_contract",
+          violation.message,
+          { reason: violation.reason, length: violation.length, pattern: violation.pattern }
+        );
+
+        let retried = false;
+        if (CFG.reportRetryEnabled && task.reportRetryOnViolation !== false) {
+          log("info", "report_contract_retry", { taskId: task.taskId });
+          await sendEvent(task, "report_retry_attempt", "report_contract",
+            "Retrying task in report-only mode after contract violation",
+            { originalReason: violation.reason }
+          );
+          const retryTask = {
+            ...task,
+            _isolatedPrompt: buildPrompt(task) +
+              "\n\nIMPORTANT: Your previous response was rejected because it was empty or a trivial acknowledgement. " +
+              "You MUST provide a detailed, substantive report of your work including what was done, what changed, and the outcome.",
+          };
+          const retryResult = await executeTask(retryTask, stepCtxMain);
+          const retryViolation = validateReportContract(retryResult.output.stdout, task);
+          if (!retryViolation) {
+            log("info", "report_contract_retry_success", { taskId: task.taskId });
+            result = retryResult;
+            retried = true;
+          } else {
+            log("warn", "report_contract_retry_failed", {
+              taskId: task.taskId,
+              retryReason: retryViolation.reason,
+            });
+          }
+        }
+
+        if (!retried) {
+          result.status = "failed";
+          result.meta.failureReason = "report_contract_violation";
+          result.meta.reportContractViolation = violation;
+        }
+      }
     }
 
     log("info", "task done", {
