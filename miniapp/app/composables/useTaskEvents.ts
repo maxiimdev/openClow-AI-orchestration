@@ -13,6 +13,15 @@ export function useTaskEvents(id: Ref<string> | string) {
   )
 
   const mergedEvents = ref<TaskEvent[]>([])
+  const lastTaskId = ref(taskId.value)
+
+  // Reset accumulated events when taskId changes to prevent cross-task bleed
+  watch(taskId, (newId) => {
+    if (newId !== lastTaskId.value) {
+      mergedEvents.value = []
+      lastTaskId.value = newId
+    }
+  })
 
   const query = useQuery({
     queryKey: ['task-events', taskId],

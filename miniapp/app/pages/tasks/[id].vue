@@ -55,7 +55,7 @@ const events = computed(() => eventsData.value?.events ?? [])
           <span :class="task.result.exitCode === 0 ? 'text-green-600' : 'text-red-600'" class="font-mono">
             exit {{ task.result.exitCode }}
           </span>
-          <span class="text-gray-400">{{ (task.result.durationMs / 1000).toFixed(1) }}s</span>
+          <span v-if="task.result.durationMs > 0" class="text-gray-400">{{ (task.result.durationMs / 1000).toFixed(1) }}s</span>
           <span v-if="task.result.truncated" class="text-amber-500 text-xs">(truncated)</span>
         </div>
         <pre v-if="task.result.stdout" class="mt-2 text-xs bg-gray-50 rounded p-2 overflow-x-auto max-h-48 overflow-y-auto">{{ task.result.stdout }}</pre>

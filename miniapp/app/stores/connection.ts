@@ -8,7 +8,7 @@ export const useConnectionStore = defineStore('connection', () => {
 
   function setSseState(state: SSEState) {
     sseState.value = state
-    isStale.value = state === 'polling' || state === 'disconnected'
+    isStale.value = state !== 'connected'
   }
 
   return { sseState, isStale, setSseState }

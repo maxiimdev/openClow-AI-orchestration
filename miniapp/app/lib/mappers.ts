@@ -73,6 +73,7 @@ export function formatRelativeTime(isoDate: string): string {
   const diffMs = now - then
   const diffSec = Math.floor(diffMs / 1000)
 
+  if (diffSec < 5) return 'just now'
   if (diffSec < 60) return `${diffSec}s ago`
   const diffMin = Math.floor(diffSec / 60)
   if (diffMin < 60) return `${diffMin}m ago`

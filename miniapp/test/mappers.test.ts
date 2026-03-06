@@ -79,6 +79,16 @@ describe('getStatusColor', () => {
 })
 
 describe('formatRelativeTime', () => {
+  it('returns "just now" for very recent timestamps (< 5s)', () => {
+    const justNow = new Date(Date.now() - 1000).toISOString()
+    expect(formatRelativeTime(justNow)).toBe('just now')
+  })
+
+  it('returns "just now" for 0s diff instead of "0s ago"', () => {
+    const now = new Date().toISOString()
+    expect(formatRelativeTime(now)).toBe('just now')
+  })
+
   it('formats seconds', () => {
     const recent = new Date(Date.now() - 30000).toISOString()
     expect(formatRelativeTime(recent)).toBe('30s ago')
