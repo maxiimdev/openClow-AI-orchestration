@@ -2222,6 +2222,331 @@ function isWorktreeDiskBlocked() {
   return _worktreeDiskBlocked;
 }
 
+// ── STAGE W5: OPERATOR UX + CONTROL SURFACE ─────────────────────────────────────
+// Inspect, list, force-cleanup, and Telegram-friendly formatting for worktrees.
+
+// Registry: tracks worktree metadata per taskId for operator queries.
+// Entries are added in processTask when a worktree is created, removed on cleanup.
+const _worktreeRegistry = new Map(); // taskId → { worktreePath, branch, baseRepoPath, slotId, createdAt }
+
+function worktreeRegistryAdd(taskId, info) {
+  _worktreeRegistry.set(taskId, {
+    worktreePath: info.worktreePath,
+    branch: info.branch,
+    baseRepoPath: info.baseRepoPath,
+    slotId: info.slotId || null,
+    createdAt: Date.now(),
+  });
+}
+
+function worktreeRegistryRemove(taskId) {
+  _worktreeRegistry.delete(taskId);
+}
+
+/**
+ * Inspect a worktree by taskId.
+ * Returns metadata: path, branch, age, active/idle, disk usage.
+ * Works for both active (in-registry) and completed (on-disk) worktrees.
+ */
+function inspectWorktree(taskId, repoPaths) {
+  const entry = _worktreeRegistry.get(taskId);
+  const isActive = _activeWorktreeTaskIds.has(taskId);
+
+  // Check registry first (active or recently active)
+  if (entry) {
+    const ageMs = Date.now() - entry.createdAt;
+    let diskUsageBytes = 0;
+    try {
+      if (fs.existsSync(entry.worktreePath)) {
+        diskUsageBytes = dirSizeSync(entry.worktreePath);
+      }
+    } catch (_) {}
+
+    return {
+      found: true,
+      taskId,
+      worktreePath: entry.worktreePath,
+      branch: entry.branch,
+      baseRepoPath: entry.baseRepoPath,
+      slotId: entry.slotId,
+      createdAt: entry.createdAt,
+      ageMs,
+      status: isActive ? "active" : "idle",
+      diskUsageBytes,
+    };
+  }
+
+  // Fall back to scanning .worktrees directories on disk
+  for (const repoPath of (repoPaths || [])) {
+    const wtDir = path.join(repoPath, WORKTREE_BASE_DIR, taskId);
+    if (fs.existsSync(wtDir)) {
+      let stat;
+      try { stat = fs.statSync(wtDir); } catch (_) { continue; }
+      const ageMs = Date.now() - stat.mtimeMs;
+      let diskUsageBytes = 0;
+      try { diskUsageBytes = dirSizeSync(wtDir); } catch (_) {}
+
+      // Try to detect branch from HEAD file
+      let branch = null;
+      try {
+        const headFile = path.join(wtDir, ".git");
+        if (fs.existsSync(headFile)) {
+          const headContent = fs.readFileSync(path.join(wtDir, ".git"), "utf-8").trim();
+          // .git file in worktree contains "gitdir: ..." pointing to main repo's worktree dir
+          // Try reading HEAD from the worktree
+          const gitDirMatch = headContent.match(/^gitdir:\s*(.+)$/);
+          if (gitDirMatch) {
+            const gitDir = gitDirMatch[1];
+            const headPath = path.join(gitDir, "HEAD");
+            if (fs.existsSync(headPath)) {
+              const ref = fs.readFileSync(headPath, "utf-8").trim();
+              const refMatch = ref.match(/^ref:\s*refs\/heads\/(.+)$/);
+              branch = refMatch ? refMatch[1] : ref.slice(0, 12);
+            }
+          }
+        }
+      } catch (_) {}
+
+      return {
+        found: true,
+        taskId,
+        worktreePath: wtDir,
+        branch,
+        baseRepoPath: repoPath,
+        slotId: null,
+        createdAt: stat.birthtimeMs || stat.mtimeMs,
+        ageMs,
+        status: isActive ? "active" : "stale",
+        diskUsageBytes,
+      };
+    }
+  }
+
+  return { found: false, taskId };
+}
+
+/**
+ * List all active slots and worktrees.
+ * Returns slot info + worktree registry + on-disk worktrees.
+ */
+function listWorktrees(repoPaths) {
+  const slots = [];
+  for (const [slotId, slotInfo] of _activeSlots.entries()) {
+    slots.push({
+      slotId,
+      taskId: slotInfo.taskId,
+      status: "active",
+    });
+  }
+
+  const registered = [];
+  for (const [taskId, entry] of _worktreeRegistry.entries()) {
+    registered.push({
+      taskId,
+      worktreePath: entry.worktreePath,
+      branch: entry.branch,
+      slotId: entry.slotId,
+      ageMs: Date.now() - entry.createdAt,
+      status: _activeWorktreeTaskIds.has(taskId) ? "active" : "idle",
+    });
+  }
+
+  // Also scan disk for orphaned worktrees not in registry
+  const onDisk = [];
+  for (const repoPath of (repoPaths || [])) {
+    const wtBase = path.join(repoPath, WORKTREE_BASE_DIR);
+    if (!fs.existsSync(wtBase)) continue;
+    try {
+      const entries = fs.readdirSync(wtBase, { withFileTypes: true });
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const taskId = entry.name;
+        if (_worktreeRegistry.has(taskId)) continue; // already in registered list
+        let stat;
+        try { stat = fs.statSync(path.join(wtBase, taskId)); } catch (_) { continue; }
+        onDisk.push({
+          taskId,
+          worktreePath: path.join(wtBase, taskId),
+          repoPath,
+          ageMs: Date.now() - stat.mtimeMs,
+          status: _activeWorktreeTaskIds.has(taskId) ? "active" : "stale",
+        });
+      }
+    } catch (_) {}
+  }
+
+  return {
+    activeSlots: slots,
+    totalSlots: CFG.maxParallelWorktrees,
+    registeredWorktrees: registered,
+    onDiskOrphans: onDisk,
+    diskUsage: getWorktreeDiskUsage(repoPaths || []),
+  };
+}
+
+/**
+ * Force cleanup a worktree by taskId.
+ * Default: denies cleanup if task is active. Pass force=true to override.
+ * Returns { success, denied, reason, warning }.
+ */
+function forceCleanupWorktree(taskId, repoPaths, { force = false } = {}) {
+  const isActive = _activeWorktreeTaskIds.has(taskId);
+
+  if (isActive && !force) {
+    log("warn", "w5-force-cleanup-denied", { taskId, reason: "task_active" });
+    return {
+      success: false,
+      denied: true,
+      reason: "task is currently active; use force=true to override",
+    };
+  }
+
+  let warning = null;
+  if (isActive && force) {
+    warning = "forced cleanup of active task — task may fail or produce partial results";
+    log("warn", "w5-force-cleanup-active-override", { taskId, warning });
+  }
+
+  // Find the worktree path
+  let wtPath = null;
+  let baseRepoPath = null;
+  const entry = _worktreeRegistry.get(taskId);
+  if (entry) {
+    wtPath = entry.worktreePath;
+    baseRepoPath = entry.baseRepoPath;
+  } else {
+    // Scan disk
+    for (const repoPath of (repoPaths || [])) {
+      const candidate = path.join(repoPath, WORKTREE_BASE_DIR, taskId);
+      if (fs.existsSync(candidate)) {
+        wtPath = candidate;
+        baseRepoPath = repoPath;
+        break;
+      }
+    }
+  }
+
+  if (!wtPath || !fs.existsSync(wtPath)) {
+    return {
+      success: false,
+      denied: false,
+      reason: "worktree not found on disk",
+    };
+  }
+
+  // Remove it
+  try {
+    fs.rmSync(wtPath, { recursive: true, force: true });
+    // Prune git worktree registry
+    try {
+      require("child_process").execSync("git worktree prune", {
+        cwd: baseRepoPath,
+        stdio: "ignore",
+        timeout: 10000,
+      });
+    } catch (_) {}
+  } catch (err) {
+    log("warn", "w5-force-cleanup-failed", { taskId, err: err.message });
+    return {
+      success: false,
+      denied: false,
+      reason: `cleanup failed: ${err.message}`,
+    };
+  }
+
+  // Clean up tracking state
+  _worktreeRegistry.delete(taskId);
+  _activeWorktreeTaskIds.delete(taskId);
+
+  log("info", "w5-force-cleanup-done", { taskId, wtPath, forced: isActive && force, warning });
+
+  return {
+    success: true,
+    denied: false,
+    reason: null,
+    warning,
+    cleanedPath: wtPath,
+  };
+}
+
+/**
+ * Format a compact Telegram-friendly status summary for a task event.
+ * Returns a short string suitable for bot messages.
+ */
+function formatTelegramStatus(eventData) {
+  const { taskId, status, phase, message, meta } = eventData;
+  const shortId = (taskId || "???").slice(-8);
+  const slot = meta?.slotId ? ` [${meta.slotId}]` : "";
+  const branch = meta?.worktreeBranch || meta?.branch || "";
+  const branchTag = branch ? ` \u2192 ${branch}` : "";
+
+  const statusIcons = {
+    claimed: "\u2705",
+    started: "\u25B6\uFE0F",
+    progress: "\u23F3",
+    completed: "\u2705",
+    review_pass: "\u2705",
+    review_fail: "\u274C",
+    needs_input: "\u2753",
+    needs_patch: "\uD83D\uDD27",
+    escalated: "\u26A0\uFE0F",
+    failed: "\u274C",
+    timeout: "\u23F0",
+    rejected: "\uD83D\uDEAB",
+  };
+  const icon = statusIcons[status] || "\u2139\uFE0F";
+
+  // Build compact summary
+  let summary = `${icon} ${shortId}${slot}${branchTag}\n`;
+  summary += `${status}/${phase}`;
+
+  if (message) {
+    const shortMsg = message.length > 120 ? message.slice(0, 117) + "..." : message;
+    summary += `: ${shortMsg}`;
+  }
+
+  // Add duration if available
+  if (meta?.durationMs) {
+    const secs = (meta.durationMs / 1000).toFixed(1);
+    summary += ` (${secs}s)`;
+  }
+
+  // Add slot utilization
+  if (meta?.activeSlots !== undefined && meta?.totalSlots !== undefined) {
+    summary += `\nslots: ${meta.activeSlots}/${meta.totalSlots}`;
+  }
+
+  // Add worktree info if present
+  if (meta?.worktreePath) {
+    summary += `\nwt: ${path.basename(meta.worktreePath)}`;
+  }
+
+  // Add disk usage for disk-related events
+  if (meta?.disk_usage_bytes !== undefined) {
+    const mb = (meta.disk_usage_bytes / (1024 * 1024)).toFixed(1);
+    summary += `\ndisk: ${mb}MB`;
+  }
+
+  return summary;
+}
+
+/**
+ * Build enriched event metadata for worktree-aware task notifications.
+ * Merges standard fields (taskId, slotId, worktreePath, branch, status phase)
+ * into the event meta object.
+ */
+function enrichEventMeta(task, slotCtx, worktreeInfo, baseMeta) {
+  const enriched = { ...baseMeta };
+  enriched.taskId = task.taskId;
+  enriched.slotId = slotCtx?.slotId || null;
+  if (worktreeInfo) {
+    enriched.worktreePath = worktreeInfo.worktreePath;
+    enriched.worktreeBranch = worktreeInfo.branch;
+    enriched.baseCommit = worktreeInfo.baseCommit;
+  }
+  return enriched;
+}
+
 // ── MAIN LOOP ──────────────────────────────────────────────────────────────────
 
 let shuttingDown = false;
@@ -2340,6 +2665,13 @@ async function processTask(task, slotCtx) {
         };
         // Override repoPath so executeTask runs inside the worktree
         task.scope.repoPath = wtPath;
+        // W5: register worktree for operator inspection
+        worktreeRegistryAdd(task.taskId, {
+          worktreePath: wtPath,
+          branch: task.scope.branch,
+          baseRepoPath: baseRepo,
+          slotId: slotCtx.slotId,
+        });
         log("info", "worktree created", { taskId: task.taskId, wtPath, baseCommit, branch: task.scope.branch, slotId: slotCtx.slotId });
         await sendEvent(task, "progress", "worktree", `worktree created at ${wtPath}`, {
           worktreePath: wtPath,
@@ -2588,6 +2920,7 @@ async function processTask(task, slotCtx) {
     if (worktreeInfo && !task.keepWorktree) {
       task.scope.repoPath = originalRepoPath;
       await removeWorktree(worktreeInfo.baseRepoPath, task.taskId);
+      worktreeRegistryRemove(task.taskId); // W5
       log("info", "worktree removed", { taskId: task.taskId, wtPath: worktreeInfo.worktreePath });
     } else if (worktreeInfo && task.keepWorktree) {
       log("info", "worktree kept (keepWorktree=true)", { taskId: task.taskId, wtPath: worktreeInfo.worktreePath });
@@ -2607,6 +2940,7 @@ async function processTask(task, slotCtx) {
       await removeWorktree(worktreeInfo.baseRepoPath, task.taskId).catch((wtErr) =>
         log("warn", "worktree cleanup failed in error handler", { err: wtErr.message })
       );
+      if (task?.taskId) worktreeRegistryRemove(task.taskId); // W5
     }
     // W4: untrack active worktree
     if (task?.taskId) _activeWorktreeTaskIds.delete(task.taskId);
