@@ -58,6 +58,65 @@ const REVIEW_PASS_RE = /\[REVIEW_PASS\]/i;
 const REVIEW_FAIL_RE = /\[REVIEW_FAIL(?:\s+severity=([^\]]+))?\]([\s\S]*?)\[\/REVIEW_FAIL\]/i;
 const REVIEW_FINDINGS_JSON_RE = /\[REVIEW_FINDINGS_JSON\]([\s\S]*?)\[\/REVIEW_FINDINGS_JSON\]/i;
 
+// ── HARD REVIEW GATE ──────────────────────────────────────────────────────────
+// State transition table: defines valid terminal statuses per mode.
+// Tasks with requireReviewGate flag cannot reach "completed" without review_pass.
+const VALID_TERMINAL_STATUSES = {
+  dry_run:    new Set(["completed", "failed", "timeout", "rejected"]),
+  implement:  new Set(["completed", "failed", "timeout", "rejected", "needs_input", "review_pass", "escalated"]),
+  review:     new Set(["review_pass", "review_fail", "failed", "timeout", "rejected", "escalated", "needs_input"]),
+  tests:      new Set(["completed", "failed", "timeout", "rejected"]),
+};
+
+// Statuses that are never allowed to bypass the review gate.
+// If a task has requireReviewGate=true, "completed" is only allowed after review_pass.
+const REVIEW_GATED_BLOCK = new Set(["completed"]);
+
+function enforceReviewGate(task, result) {
+  // Legacy tasks without requireReviewGate: no enforcement (backward compatible)
+  if (!task.requireReviewGate) return result;
+
+  // Review mode: completed is never valid (already handled by existing gate, but double-check)
+  if (task.mode === "review" && result.status === "completed") {
+    log("error", "review-gate-hard: completed blocked for review mode", { taskId: task.taskId });
+    result.status = "review_fail";
+    result.meta.reviewGateEnforced = true;
+    result.meta.reviewGateReason = "completed status illegal for review mode with requireReviewGate";
+    return result;
+  }
+
+  // Implement mode with review gate: completed only allowed if review was passed
+  if (task.mode === "implement" && REVIEW_GATED_BLOCK.has(result.status)) {
+    if (!result.meta.reviewVerdict || result.meta.reviewVerdict !== "pass") {
+      log("error", "review-gate-hard: completed blocked — review not passed", {
+        taskId: task.taskId,
+        reviewVerdict: result.meta.reviewVerdict || "none",
+      });
+      result.status = "escalated";
+      result.meta.reviewGateEnforced = true;
+      result.meta.reviewGateReason = "completed blocked: review gate not passed";
+      result.meta.escalationReason = result.meta.escalationReason || "review gate: task completed without review_pass";
+      return result;
+    }
+  }
+
+  // Validate against terminal status table
+  const allowed = VALID_TERMINAL_STATUSES[task.mode];
+  if (allowed && !allowed.has(result.status)) {
+    log("error", "review-gate-hard: illegal terminal status", {
+      taskId: task.taskId,
+      mode: task.mode,
+      status: result.status,
+    });
+    result.status = "failed";
+    result.meta.reviewGateEnforced = true;
+    result.meta.reviewGateReason = `illegal terminal status "${result.status}" for mode "${task.mode}"`;
+    return result;
+  }
+
+  return result;
+}
+
 function required(key) {
   const v = process.env[key];
   if (!v) {
@@ -954,12 +1013,14 @@ function buildPlan(task) {
       "report",
     ];
   }
-  return [
+  const steps = [
     "validate",
     `checkout ${branch}`,
     `spawn claude (${model})`,
-    "report",
   ];
+  if (task.requireReviewGate) steps.push("review_gate");
+  steps.push("report");
+  return steps;
 }
 
 // ── EXECUTE ────────────────────────────────────────────────────────────────────
@@ -1374,10 +1435,22 @@ async function mainLoop() {
         result.meta.reviewFindings = "Review gate enforced: completed status not allowed for review mode tasks.";
       }
 
+      // ── HARD REVIEW GATE (Stage 2) ──
+      // Invariant: if task.requireReviewGate, enforce pipeline constraints.
+      // Must run after all status transformations (needs_input, review verdict parsing).
+      enforceReviewGate(task, result);
+      if (result.meta.reviewGateEnforced) {
+        await sendEvent(task, result.status, "review_gate",
+          `review gate enforced: ${result.meta.reviewGateReason}`,
+          { reviewGateEnforced: true, reviewGateReason: result.meta.reviewGateReason }
+        );
+      }
+
       log("info", "task done", {
         taskId: task.taskId,
         status: result.status,
         durationMs: result.meta.durationMs,
+        reviewGateEnforced: result.meta.reviewGateEnforced || false,
       });
 
       if (result.status === "needs_input" && ni && ni.isStructuredAsk && ni.question) {
