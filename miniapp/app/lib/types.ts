@@ -39,6 +39,15 @@ export interface Finding {
   acceptance_check: string
 }
 
+export interface Artifact {
+  name: string
+  kind: string
+  path: string
+  bytes: number
+  sha256: string
+  preview: string
+}
+
 export interface Task {
   id: string
   userId: number
@@ -64,6 +73,8 @@ export interface Task {
     exitCode: number
     durationMs: number
   } | null
+  resultVersion?: number
+  artifacts?: Artifact[] | null
 }
 
 export interface TaskEvent {

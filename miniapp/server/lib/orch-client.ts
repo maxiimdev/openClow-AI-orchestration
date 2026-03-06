@@ -41,6 +41,15 @@ export interface OrchTask {
     stderr: string
     truncated: boolean
   } | null
+  resultVersion?: number
+  artifacts?: Array<{
+    name: string
+    kind: string
+    path: string
+    bytes: number
+    sha256: string
+    preview: string
+  }> | null
   meta?: Record<string, unknown>
   events?: OrchEvent[]
   createdAt?: string

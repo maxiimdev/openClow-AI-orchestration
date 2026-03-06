@@ -2,6 +2,7 @@
 "use strict";
 
 const { spawn } = require("child_process");
+const crypto = require("crypto");
 const path = require("path");
 const fs = require("fs");
 
@@ -47,6 +48,7 @@ const CFG = {
 
 const STDOUT_LIMIT = 200 * 1024;
 const STDERR_LIMIT = 200 * 1024;
+const INLINE_OUTPUT_LIMIT = 8 * 1024; // 8KB inline cap for v2 result
 const BRANCH_RE = /^(agent|hotfix|feature|bugfix)\/[a-zA-Z0-9._-]+$/;
 const BLOCKED_BRANCHES = new Set(["main", "master"]);
 const ALLOWED_MODELS = new Set(["sonnet", "opus"]);
@@ -238,6 +240,75 @@ function truncate(str, limit) {
   // avoid splitting a multi-byte char
   const text = buf.toString("utf-8");
   return { text: text + "\n[TRUNCATED]", truncated: true };
+}
+
+// ── ARTIFACT PERSISTENCE (v2 result contract) ───────────────────────────────
+
+const ARTIFACTS_DIR = path.join(__dirname, "data", "artifacts");
+
+/**
+ * Persist a string blob as an artifact file under data/artifacts/<taskId>/.
+ * Returns artifact metadata object.
+ */
+function saveArtifact(taskId, name, kind, content) {
+  const dir = path.join(ARTIFACTS_DIR, taskId);
+  fs.mkdirSync(dir, { recursive: true });
+
+  const buf = Buffer.from(content, "utf-8");
+  const sha256 = crypto.createHash("sha256").update(buf).digest("hex");
+  const filePath = path.join(dir, name);
+  fs.writeFileSync(filePath, buf);
+
+  const preview = content.slice(0, 512);
+
+  return {
+    name,
+    kind,
+    path: `data/artifacts/${taskId}/${name}`,
+    bytes: buf.length,
+    sha256,
+    preview,
+  };
+}
+
+/**
+ * Build v2 result output: persist large stdout/stderr as artifact files,
+ * truncate inline output to INLINE_OUTPUT_LIMIT (8KB).
+ * Returns { output, artifacts } where output has inline-capped text and
+ * artifacts is the metadata array.
+ */
+function buildV2Output(taskId, output) {
+  const artifacts = [];
+  let inlineStdout = output.stdout;
+  let inlineStderr = output.stderr;
+  let truncated = output.truncated;
+
+  // Persist stdout as artifact if it exceeds inline cap
+  if (Buffer.byteLength(output.stdout, "utf-8") > INLINE_OUTPUT_LIMIT) {
+    const art = saveArtifact(taskId, "stdout.txt", "stdout", output.stdout);
+    artifacts.push(art);
+    const trunc = truncate(output.stdout, INLINE_OUTPUT_LIMIT);
+    inlineStdout = trunc.text + `\n[full output: ${art.path}]`;
+    truncated = true;
+  }
+
+  // Persist stderr as artifact if it exceeds inline cap
+  if (Buffer.byteLength(output.stderr, "utf-8") > INLINE_OUTPUT_LIMIT) {
+    const art = saveArtifact(taskId, "stderr.txt", "stderr", output.stderr);
+    artifacts.push(art);
+    const trunc = truncate(output.stderr, INLINE_OUTPUT_LIMIT);
+    inlineStderr = trunc.text + `\n[full output: ${art.path}]`;
+    truncated = true;
+  }
+
+  return {
+    output: {
+      stdout: inlineStdout,
+      stderr: inlineStderr,
+      truncated,
+    },
+    artifacts,
+  };
 }
 
 // ── NEEDS_INPUT PARSER ────────────────────────────────────────────────────────
@@ -1346,12 +1417,16 @@ async function mainLoop() {
         stepIndex: stepTotal,
         stepTotal,
       });
+      // Build v2 result: persist artifacts + truncate inline output
+      const v2 = buildV2Output(task.taskId, result.output);
       const resultBody = {
+        resultVersion: 2,
         workerId: CFG.workerId,
         taskId: task.taskId,
         status: result.status,
         mode: task.mode,
-        output: result.output,
+        output: v2.output,
+        artifacts: v2.artifacts,
         meta: result.meta,
       };
       // For needs_input: hoist question/options/context to top-level so the

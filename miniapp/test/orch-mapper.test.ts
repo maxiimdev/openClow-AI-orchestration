@@ -111,6 +111,45 @@ describe('mapOrchTask', () => {
     expect(task.message).toBe('Status: progress')
   })
 
+  it('uses stable fallback timestamp when createdAt/updatedAt missing', () => {
+    const orch: OrchTask = {
+      ...baseOrch,
+      createdAt: undefined,
+      updatedAt: undefined,
+      events: [
+        { taskId: 'task-abc-123', status: 'claimed', phase: 'pull', message: 'Claimed', createdAt: '2025-06-01T00:00:00Z' },
+      ],
+    }
+    const task1 = mapOrchTask(orch)
+    const task2 = mapOrchTask(orch)
+    // Must be deterministic (not Date.now())
+    expect(task1.createdAt).toBe('2025-06-01T00:00:00Z')
+    expect(task2.createdAt).toBe('2025-06-01T00:00:00Z')
+    expect(task1.updatedAt).toBe('2025-06-01T00:00:00Z')
+  })
+
+  it('uses epoch when no timestamps and no events', () => {
+    const orch: OrchTask = {
+      ...baseOrch,
+      createdAt: undefined,
+      updatedAt: undefined,
+      events: undefined,
+    }
+    const task = mapOrchTask(orch)
+    expect(task.createdAt).toBe('1970-01-01T00:00:00Z')
+    expect(task.updatedAt).toBe('1970-01-01T00:00:00Z')
+  })
+
+  it('uses createdAt as updatedAt fallback when only updatedAt is missing', () => {
+    const orch: OrchTask = {
+      ...baseOrch,
+      createdAt: '2025-03-01T12:00:00Z',
+      updatedAt: undefined,
+    }
+    const task = mapOrchTask(orch)
+    expect(task.updatedAt).toBe('2025-03-01T12:00:00Z')
+  })
+
   it('maps all worker statuses correctly', () => {
     const cases: Array<[string, string]> = [
       ['claimed', 'running'],
@@ -138,6 +177,74 @@ describe('mapOrchTask', () => {
   it('defaults unknown status to running', () => {
     const task = mapOrchTask({ ...baseOrch, status: 'mysterious' })
     expect(task.status).toBe('running')
+  })
+
+  // ── v2 result contract tests ──
+
+  it('passes through resultVersion when present', () => {
+    const orch: OrchTask = { ...baseOrch, status: 'completed', resultVersion: 2 }
+    const task = mapOrchTask(orch)
+    expect(task.resultVersion).toBe(2)
+  })
+
+  it('omits resultVersion for v1 tasks (no resultVersion field)', () => {
+    const task = mapOrchTask(baseOrch)
+    expect(task.resultVersion).toBeUndefined()
+  })
+
+  it('maps artifacts array from orch to task', () => {
+    const orch: OrchTask = {
+      ...baseOrch,
+      status: 'completed',
+      resultVersion: 2,
+      artifacts: [
+        { name: 'stdout.txt', kind: 'stdout', path: 'data/artifacts/task-abc-123/stdout.txt', bytes: 16384, sha256: 'abc123', preview: 'first 512...' },
+      ],
+      output: { stdout: 'truncated...', stderr: '', truncated: true },
+      meta: { exitCode: 0, durationMs: 5000 },
+    }
+    const task = mapOrchTask(orch)
+    expect(task.artifacts).toHaveLength(1)
+    expect(task.artifacts![0]).toEqual({
+      name: 'stdout.txt',
+      kind: 'stdout',
+      path: 'data/artifacts/task-abc-123/stdout.txt',
+      bytes: 16384,
+      sha256: 'abc123',
+      preview: 'first 512...',
+    })
+  })
+
+  it('omits artifacts for v1 tasks (no artifacts field)', () => {
+    const task = mapOrchTask(baseOrch)
+    expect(task.artifacts).toBeUndefined()
+  })
+
+  it('handles empty artifacts array gracefully', () => {
+    const orch: OrchTask = { ...baseOrch, resultVersion: 2, artifacts: [] }
+    const task = mapOrchTask(orch)
+    expect(task.artifacts).toBeUndefined() // empty array not mapped
+  })
+
+  it('v1→v2 backward compat: v1 task with output still maps result correctly', () => {
+    const orch: OrchTask = {
+      ...baseOrch,
+      status: 'completed',
+      output: { stdout: 'full output here', stderr: '', truncated: false },
+      meta: { exitCode: 0, durationMs: 3000 },
+    }
+    const task = mapOrchTask(orch)
+    // v1 fields still work
+    expect(task.result).toEqual({
+      stdout: 'full output here',
+      stderr: '',
+      truncated: false,
+      exitCode: 0,
+      durationMs: 3000,
+    })
+    // v2 fields absent
+    expect(task.resultVersion).toBeUndefined()
+    expect(task.artifacts).toBeUndefined()
   })
 })
 
@@ -170,6 +277,19 @@ describe('mapOrchEvent', () => {
     }
     const mapped = mapOrchEvent(ev, 3)
     expect(mapped.id).toBe('evt-3')
+  })
+
+  it('uses stable epoch fallback when createdAt missing', () => {
+    const ev: OrchEvent = {
+      taskId: 'task-1',
+      status: 'claimed',
+      phase: 'pull',
+      message: 'Claimed',
+    }
+    const mapped1 = mapOrchEvent(ev, 0)
+    const mapped2 = mapOrchEvent(ev, 0)
+    expect(mapped1.createdAt).toBe('1970-01-01T00:00:00Z')
+    expect(mapped2.createdAt).toBe('1970-01-01T00:00:00Z')
   })
 })
 

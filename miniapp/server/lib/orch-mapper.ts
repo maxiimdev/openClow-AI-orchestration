@@ -9,7 +9,7 @@
  *   - Orch has no userId — miniapp assigns a placeholder (see MVP visibility policy)
  */
 
-import type { Task, TaskEvent, UserStatus, WorkerStatus } from '../../app/lib/types'
+import type { Task, TaskEvent, UserStatus, WorkerStatus, Artifact } from '../../app/lib/types'
 import type { OrchTask, OrchEvent } from './orch-client'
 
 const WORKER_TO_USER_STATUS: Record<string, UserStatus> = {
@@ -34,6 +34,15 @@ function mapStatus(orchStatus: string): UserStatus {
   return WORKER_TO_USER_STATUS[orchStatus] ?? 'running'
 }
 
+/** Stable fallback timestamp: derive from earliest event or use epoch */
+function fallbackTimestamp(orch: OrchTask): string {
+  if (orch.events?.length) {
+    const first = orch.events[0]
+    if (first.createdAt) return first.createdAt
+  }
+  return '1970-01-01T00:00:00Z'
+}
+
 /**
  * Map an orch-api task to the miniapp Task interface.
  *
@@ -53,8 +62,8 @@ export function mapOrchTask(orch: OrchTask): Task {
     internalStatus: orch.status as WorkerStatus,
     branch: orch.scope?.branch ?? '',
     repoPath: orch.scope?.repoPath ?? '',
-    createdAt: orch.createdAt ?? new Date().toISOString(),
-    updatedAt: orch.updatedAt ?? new Date().toISOString(),
+    createdAt: orch.createdAt ?? fallbackTimestamp(orch),
+    updatedAt: orch.updatedAt ?? orch.createdAt ?? fallbackTimestamp(orch),
     message: latestMessage(orch),
     meta: orch.meta ?? {},
   }
@@ -87,6 +96,19 @@ export function mapOrchTask(orch: OrchTask): Task {
     }
   }
 
+  // v2 result fields — pass through when present
+  if (orch.resultVersion) task.resultVersion = orch.resultVersion
+  if (orch.artifacts?.length) {
+    task.artifacts = orch.artifacts.map((a): Artifact => ({
+      name: a.name,
+      kind: a.kind,
+      path: a.path,
+      bytes: a.bytes,
+      sha256: a.sha256,
+      preview: a.preview,
+    }))
+  }
+
   return task
 }
 
@@ -114,7 +136,7 @@ export function mapOrchEvent(ev: OrchEvent, index: number): TaskEvent {
     phase: ev.phase ?? '',
     message: ev.message ?? '',
     meta: ev.meta ?? {},
-    createdAt: ev.createdAt ?? new Date().toISOString(),
+    createdAt: ev.createdAt ?? '1970-01-01T00:00:00Z',
   }
 }
 
