@@ -259,3 +259,118 @@ describe('Phase 3: feature flags', () => {
     expect(display!.displayOutput).toBe('')
   })
 })
+
+describe('Phase 3: orch-api v2 result contract round-trip', () => {
+  beforeEach(() => {
+    process.env.MINIAPP_DATA_MODE = 'orch'
+    process.env.ORCH_API_BASE_URL = 'http://localhost:9999'
+    process.env.ORCH_API_TOKEN = 'test-token'
+    resetCache()
+    vi.clearAllMocks()
+    const db = new Database(':memory:')
+    setDb(db)
+  })
+
+  afterEach(() => {
+    closeDb()
+    delete process.env.MINIAPP_DATA_MODE
+    delete process.env.ORCH_API_BASE_URL
+    delete process.env.ORCH_API_TOKEN
+    delete process.env.RESULT_V2_ENABLED
+    delete process.env.ARTIFACT_INDEXING_ENABLED
+  })
+
+  it('v2 result with resultVersion and artifacts round-trips via getTask', async () => {
+    mockOrchGetTask.mockResolvedValue(v2Task)
+    const task = await getTask('v2-new-task', 0)
+    expect(task).not.toBeNull()
+    expect(task!.resultVersion).toBe(2)
+    expect(task!.artifacts).toHaveLength(2)
+    expect(task!.artifacts![0]).toEqual({
+      name: 'stdout.txt',
+      kind: 'stdout',
+      path: 'data/artifacts/v2-new-task/stdout.txt',
+      bytes: 16384,
+      sha256: 'abc123def456',
+      preview: 'Full task output summary with details about implementation...',
+    })
+    expect(task!.artifacts![1]).toEqual({
+      name: 'report.md',
+      kind: 'markdown',
+      path: 'data/artifacts/v2-new-task/report.md',
+      bytes: 4096,
+      sha256: 'def789ghi012',
+      preview: '## Summary\nAll tests passed. Code quality improved.',
+    })
+    // v1 result field also present alongside v2
+    expect(task!.result).toEqual({
+      stdout: 'truncated inline...',
+      stderr: '',
+      truncated: true,
+      exitCode: 0,
+      durationMs: 12000,
+    })
+  })
+
+  it('v1 result payload persists without v2 fields', async () => {
+    mockOrchGetTask.mockResolvedValue(v1Task)
+    const task = await getTask('v1-old-task', 0)
+    expect(task).not.toBeNull()
+    expect(task!.resultVersion).toBeUndefined()
+    expect(task!.artifacts).toBeUndefined()
+    expect(task!.result).toEqual({
+      stdout: 'All done. Tests pass.',
+      stderr: '',
+      truncated: false,
+      exitCode: 0,
+      durationMs: 5000,
+    })
+  })
+
+  it('v2 result with empty artifacts array yields no artifacts on task', async () => {
+    const emptyArtifacts: OrchTask = {
+      ...v2Task,
+      artifacts: [],
+    }
+    mockOrchGetTask.mockResolvedValue(emptyArtifacts)
+    const task = await getTask('v2-new-task', 0)
+    expect(task).not.toBeNull()
+    expect(task!.resultVersion).toBe(2)
+    expect(task!.artifacts).toBeUndefined() // empty array not mapped
+  })
+
+  it('v2 result with null artifacts yields no artifacts on task', async () => {
+    const nullArtifacts: OrchTask = {
+      ...v2Task,
+      artifacts: null,
+    }
+    mockOrchGetTask.mockResolvedValue(nullArtifacts)
+    const task = await getTask('v2-new-task', 0)
+    expect(task).not.toBeNull()
+    expect(task!.resultVersion).toBe(2)
+    expect(task!.artifacts).toBeUndefined()
+  })
+
+  it('v2 result with missing artifacts field yields no artifacts on task', async () => {
+    const noArtifacts: OrchTask = {
+      ...v2Task,
+      artifacts: undefined,
+    }
+    mockOrchGetTask.mockResolvedValue(noArtifacts)
+    const task = await getTask('v2-new-task', 0)
+    expect(task).not.toBeNull()
+    expect(task!.resultVersion).toBe(2)
+    expect(task!.artifacts).toBeUndefined()
+  })
+
+  it('v2 result with single artifact round-trips correctly', async () => {
+    const singleArtifact: OrchTask = {
+      ...v2Task,
+      artifacts: [v2Task.artifacts![0]],
+    }
+    mockOrchGetTask.mockResolvedValue(singleArtifact)
+    const task = await getTask('v2-new-task', 0)
+    expect(task!.artifacts).toHaveLength(1)
+    expect(task!.artifacts![0].name).toBe('stdout.txt')
+  })
+})
