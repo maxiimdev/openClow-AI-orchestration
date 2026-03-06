@@ -74,8 +74,8 @@ const REVIEW_FINDINGS_JSON_RE = /\[REVIEW_FINDINGS_JSON\]([\s\S]*?)\[\/REVIEW_FI
 // Tasks with requireReviewGate flag cannot reach "completed" without review_pass.
 const VALID_TERMINAL_STATUSES = {
   dry_run:    new Set(["completed", "failed", "timeout", "rejected"]),
-  implement:  new Set(["completed", "failed", "timeout", "rejected", "needs_input", "review_pass", "escalated"]),
-  review:     new Set(["review_pass", "review_fail", "failed", "timeout", "rejected", "escalated", "needs_input"]),
+  implement:  new Set(["completed", "failed", "timeout", "rejected", "needs_input", "review_pass", "escalated", "needs_patch"]),
+  review:     new Set(["review_pass", "review_fail", "failed", "timeout", "rejected", "escalated", "needs_input", "needs_patch"]),
   tests:      new Set(["completed", "failed", "timeout", "rejected"]),
 };
 
@@ -1790,6 +1790,163 @@ async function removeWorktree(repoPath, taskId) {
   }
 }
 
+// ── STAGE W3: MERGE POLICY + SAFETY GATE ────────────────────────────────────────
+// No worktree branch may reach merge_ready/completed unless quality gates pass.
+// Gates: review (when requireReviewGate or reviewLoop), tests (when requireTestsGate).
+// Conflict detection: checks merge-base divergence before allowing merge_ready.
+
+const MERGE_GATE_STATUSES = new Set(["completed", "merge_ready"]);
+
+function evaluateMergeGate(task, result) {
+  // Only apply to worktree tasks with merge gate enabled
+  if (!task.useWorktree || !task.mergePolicy) return result;
+
+  const policy = task.mergePolicy; // { requireReview, requireTests, targetBranch }
+
+  // Only gate statuses that would indicate "done/ready to merge"
+  if (!MERGE_GATE_STATUSES.has(result.status)) return result;
+
+  const gateFailures = [];
+
+  // Gate 1: Review must have passed
+  if (policy.requireReview) {
+    const reviewPassed = result.meta.reviewVerdict === "pass" ||
+                         result.status === "review_pass" ||
+                         result.meta.mergeGateReviewOverride === true;
+    if (!reviewPassed) {
+      gateFailures.push("review_not_passed");
+    }
+  }
+
+  // Gate 2: Tests must have passed
+  if (policy.requireTests) {
+    const testsPassed = result.meta.testsVerdict === "pass" ||
+                        result.meta.mergeGateTestsOverride === true;
+    if (!testsPassed) {
+      gateFailures.push("tests_not_passed");
+    }
+  }
+
+  if (gateFailures.length === 0) return result;
+
+  // Gates failed: block merge-ready/completed
+  const reason = gateFailures.join(", ");
+  log("warn", "merge-gate-blocked", {
+    taskId: task.taskId,
+    originalStatus: result.status,
+    gateFailures,
+    reason,
+  });
+
+  result.meta.mergeGateBlocked = true;
+  result.meta.gate_blocked_reason = reason;
+  result.meta.mergeGateFailures = gateFailures;
+
+  // Determine transition: needs_patch if review failed, escalated if tests failed
+  if (gateFailures.includes("review_not_passed")) {
+    result.status = "needs_patch";
+  } else {
+    result.status = "needs_patch";
+  }
+
+  return result;
+}
+
+// Conflict-aware merge prep: detect merge conflicts before merge-ready
+function detectMergeConflict(repoPath, sourceBranch, targetBranch) {
+  return new Promise((resolve) => {
+    // Use git merge-tree to do a three-way merge check without touching the working tree
+    // First get the merge base
+    const child = spawn("git", ["merge-base", targetBranch, sourceBranch], {
+      cwd: repoPath,
+      shell: false,
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 15000,
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (c) => (stdout += c));
+    child.stderr.on("data", (c) => (stderr += c));
+    child.on("close", (code) => {
+      if (code !== 0) {
+        // Cannot determine merge base — likely no common ancestor
+        resolve({ conflict: true, reason: `merge-base failed: ${stderr.trim() || "no common ancestor"}` });
+        return;
+      }
+      const mergeBase = stdout.trim();
+      // Now do a dry merge-tree check
+      const mtChild = spawn("git", ["merge-tree", mergeBase, targetBranch, sourceBranch], {
+        cwd: repoPath,
+        shell: false,
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout: 15000,
+      });
+      let mtOut = "";
+      mtChild.stdout.on("data", (c) => (mtOut += c));
+      mtChild.on("close", (mtCode) => {
+        // merge-tree outputs conflict markers if there are conflicts
+        const hasConflict = mtOut.includes("<<<<<<") || mtOut.includes("changed in both");
+        if (hasConflict) {
+          resolve({ conflict: true, reason: "merge conflict detected in merge-tree output" });
+        } else {
+          resolve({ conflict: false, reason: null });
+        }
+      });
+      mtChild.on("error", (err) => {
+        resolve({ conflict: true, reason: `merge-tree error: ${err.message}` });
+      });
+    });
+    child.on("error", (err) => {
+      resolve({ conflict: true, reason: `merge-base error: ${err.message}` });
+    });
+  });
+}
+
+async function applyMergeConflictCheck(task, result, worktreeInfo) {
+  // Only check for worktree tasks with merge policy and successful gates so far
+  if (!task.useWorktree || !task.mergePolicy) return result;
+  if (!worktreeInfo) return result;
+  if (!MERGE_GATE_STATUSES.has(result.status) && result.status !== "review_pass") return result;
+
+  const targetBranch = task.mergePolicy.targetBranch || "main";
+  const sourceBranch = worktreeInfo.branch;
+
+  try {
+    const conflictResult = await detectMergeConflict(
+      worktreeInfo.baseRepoPath,
+      sourceBranch,
+      targetBranch
+    );
+    result.meta.mergeConflictCheck = conflictResult.conflict ? "conflict" : "clean";
+
+    if (conflictResult.conflict) {
+      log("warn", "merge-conflict-detected", {
+        taskId: task.taskId,
+        sourceBranch,
+        targetBranch,
+        reason: conflictResult.reason,
+      });
+      result.meta.mergeGateBlocked = true;
+      result.meta.gate_blocked_reason =
+        (result.meta.gate_blocked_reason ? result.meta.gate_blocked_reason + ", " : "") +
+        "merge_conflict";
+      result.meta.mergeConflictReason = conflictResult.reason;
+      result.status = "escalated";
+      result.meta.escalationReason = `merge conflict: ${conflictResult.reason}`;
+    }
+  } catch (err) {
+    log("warn", "merge-conflict-check-failed", {
+      taskId: task.taskId,
+      err: err.message,
+    });
+    // Non-fatal: do not block on conflict check failure
+    result.meta.mergeConflictCheck = "error";
+    result.meta.mergeConflictCheckError = err.message;
+  }
+
+  return result;
+}
+
 // ── MAIN LOOP ──────────────────────────────────────────────────────────────────
 
 let shuttingDown = false;
@@ -2023,6 +2180,21 @@ async function processTask(task, slotCtx) {
       );
     }
 
+    // ── MERGE SAFETY GATE (Stage W3) ──
+    evaluateMergeGate(task, result);
+    await applyMergeConflictCheck(task, result, worktreeInfo);
+    if (result.meta.mergeGateBlocked) {
+      await sendEvent(task, result.status, "merge_gate",
+        `merge gate blocked: ${result.meta.gate_blocked_reason}`,
+        {
+          mergeGateBlocked: true,
+          gate_blocked_reason: result.meta.gate_blocked_reason,
+          mergeGateFailures: result.meta.mergeGateFailures || [],
+          mergeConflictCheck: result.meta.mergeConflictCheck || null,
+        }
+      );
+    }
+
     log("info", "task done", {
       taskId: task.taskId,
       status: result.status,
@@ -2055,6 +2227,12 @@ async function processTask(task, slotCtx) {
       const sev = result.meta.reviewSeverity || "unknown";
       const summary = (result.meta.reviewFindings || "").slice(0, 200);
       await sendEvent(task, "review_fail", "report", `review failed (${sev}): ${summary}`, result.meta);
+    } else if (result.status === "needs_patch") {
+      const reason = result.meta.gate_blocked_reason || "merge gate blocked";
+      await sendEvent(task, "needs_patch", "merge_gate",
+        `needs patch: ${reason}`,
+        result.meta
+      );
     } else if (result.status === "escalated") {
       const iter = result.meta.reviewIteration || "?";
       const maxIter = result.meta.reviewMaxIterations || "?";
@@ -2097,6 +2275,11 @@ async function processTask(task, slotCtx) {
     if (result.status === "review_fail" || result.status === "escalated") {
       resultBody.structuredFindings = result.meta?.structuredFindings ?? null;
       resultBody.reviewFindings = result.meta?.reviewFindings ?? null;
+    }
+    if (result.meta.mergeGateBlocked) {
+      resultBody.gate_blocked_reason = result.meta.gate_blocked_reason ?? null;
+      resultBody.mergeGateFailures = result.meta.mergeGateFailures ?? null;
+      resultBody.mergeConflictCheck = result.meta.mergeConflictCheck ?? null;
     }
     await apiPost("/api/worker/result", resultBody);
 
