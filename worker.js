@@ -67,6 +67,12 @@ const CFG = {
   reportMinLength: int("REPORT_MIN_LENGTH", 50),
   reportRetryEnabled:
     (process.env.REPORT_RETRY_ENABLED || "false").toLowerCase() === "true",
+  // Feature branch + PR workflow policy
+  featureBranchPerTask:
+    (process.env.FEATURE_BRANCH_PER_TASK || "true").toLowerCase() === "true",
+  autoPrAfterTask:
+    (process.env.AUTO_PR_AFTER_TASK || "false").toLowerCase() === "true",
+  prTargetBranch: process.env.PR_TARGET_BRANCH || "main",
 };
 
 const STDOUT_LIMIT = 200 * 1024;
@@ -1908,6 +1914,151 @@ async function removeWorktree(repoPath, taskId) {
   }
 }
 
+// ── FEATURE BRANCH + PR WORKFLOW ──────────────────────────────────────────────
+
+/**
+ * Derive a branch name from a taskId: feature/<slug>
+ * Strips non-alphanumeric chars, lowercases, truncates to 60 chars.
+ */
+function taskIdToBranch(taskId) {
+  const slug = taskId
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 60);
+  return `feature/${slug}`;
+}
+
+/**
+ * Create and checkout a feature branch for this task in the given cwd.
+ * Returns the branch name.
+ */
+async function gitCreateFeatureBranch(cwd, taskId) {
+  const branch = taskIdToBranch(taskId);
+  await gitCheckout(cwd, branch);
+  return branch;
+}
+
+/**
+ * Push the current branch to origin.
+ * Returns { ok, branch, error? }
+ */
+function gitPush(cwd, branch) {
+  return new Promise((resolve) => {
+    const child = spawn("git", ["push", "-u", "origin", branch], {
+      cwd,
+      shell: false,
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 60000,
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (c) => (stdout += c));
+    child.stderr.on("data", (c) => (stderr += c));
+    child.on("close", (code) => {
+      if (code === 0) {
+        resolve({ ok: true, branch, output: (stdout + stderr).trim() });
+      } else {
+        resolve({ ok: false, branch, error: `git push failed (${code}): ${stderr.trim()}` });
+      }
+    });
+    child.on("error", (err) => {
+      resolve({ ok: false, branch, error: err.message });
+    });
+  });
+}
+
+/**
+ * Create a pull request via `gh pr create`. Never auto-merges.
+ * Returns { ok, prUrl?, error? }
+ */
+function ghCreatePr(cwd, branch, targetBranch, taskId) {
+  return new Promise((resolve) => {
+    const title = `feat: ${taskId}`;
+    const body = `Auto-created PR for task ${taskId}.\n\nBranch: ${branch}\nTarget: ${targetBranch}\n\n> This PR was created automatically. It will NOT be auto-merged.`;
+    const child = spawn("gh", [
+      "pr", "create",
+      "--base", targetBranch,
+      "--head", branch,
+      "--title", title,
+      "--body", body,
+    ], {
+      cwd,
+      shell: false,
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 30000,
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (c) => (stdout += c));
+    child.stderr.on("data", (c) => (stderr += c));
+    child.on("close", (code) => {
+      if (code === 0) {
+        resolve({ ok: true, prUrl: stdout.trim() });
+      } else {
+        resolve({ ok: false, error: `gh pr create failed (${code}): ${stderr.trim()}` });
+      }
+    });
+    child.on("error", (err) => {
+      resolve({ ok: false, error: err.message });
+    });
+  });
+}
+
+/**
+ * Run the post-completion feature branch workflow:
+ * 1. Create/checkout feature branch per task (if FEATURE_BRANCH_PER_TASK)
+ * 2. Push branch
+ * 3. Optionally create PR (if AUTO_PR_AFTER_TASK)
+ *
+ * Returns workflow result metadata (attached to result.meta).
+ */
+async function runFeatureBranchWorkflow(task, repoPath) {
+  const meta = { featureBranchWorkflow: true };
+
+  // Step 1: Create feature branch
+  let branch;
+  try {
+    branch = await gitCreateFeatureBranch(repoPath, task.taskId);
+    meta.featureBranch = branch;
+    log("info", "feature-branch-created", { taskId: task.taskId, branch });
+  } catch (err) {
+    meta.featureBranchError = err.message;
+    log("error", "feature-branch-create-failed", { taskId: task.taskId, err: err.message });
+    return meta;
+  }
+
+  // Step 2: Push
+  const pushResult = await gitPush(repoPath, branch);
+  meta.pushResult = pushResult.ok ? "success" : "failed";
+  if (!pushResult.ok) {
+    meta.pushError = pushResult.error;
+    log("warn", "feature-branch-push-failed", { taskId: task.taskId, branch, error: pushResult.error });
+    return meta;
+  }
+  log("info", "feature-branch-pushed", { taskId: task.taskId, branch });
+
+  // Step 3: PR creation (optional, never auto-merge)
+  if (CFG.autoPrAfterTask) {
+    const targetBranch = task.prTargetBranch || CFG.prTargetBranch;
+    const prResult = await ghCreatePr(repoPath, branch, targetBranch, task.taskId);
+    meta.prCreation = prResult.ok ? "success" : "failed";
+    if (prResult.ok) {
+      meta.prUrl = prResult.prUrl;
+      log("info", "feature-branch-pr-created", { taskId: task.taskId, branch, prUrl: prResult.prUrl });
+    } else {
+      meta.prError = prResult.error;
+      meta.prNextStep = "PR creation failed. Branch is pushed and ready for manual PR creation.";
+      log("warn", "feature-branch-pr-failed", { taskId: task.taskId, branch, error: prResult.error });
+    }
+  } else {
+    meta.prCreation = "skipped";
+    meta.prNextStep = `Branch ${branch} pushed. Create PR manually to ${task.prTargetBranch || CFG.prTargetBranch}.`;
+  }
+
+  return meta;
+}
+
 // ── STAGE W3: MERGE POLICY + SAFETY GATE ────────────────────────────────────────
 // No worktree branch may reach merge_ready/completed unless quality gates pass.
 // Gates: review (when requireReviewGate or reviewLoop), tests (when requireTestsGate).
@@ -3078,6 +3229,35 @@ async function processTask(task, slotCtx) {
       resultBody.mergeGateFailures = result.meta.mergeGateFailures ?? null;
       resultBody.mergeConflictCheck = result.meta.mergeConflictCheck ?? null;
     }
+    // ── FEATURE BRANCH WORKFLOW (pre-report) ──
+    if (
+      CFG.featureBranchPerTask &&
+      result.status === "completed" &&
+      task.scope?.repoPath &&
+      task.featureBranchPerTask !== false // per-task opt-out
+    ) {
+      try {
+        const fbMeta = await runFeatureBranchWorkflow(task, task.scope.repoPath);
+        Object.assign(result.meta, fbMeta);
+        resultBody.meta = result.meta;
+        await sendEvent(task, "completed", "feature_branch",
+          fbMeta.prUrl
+            ? `branch ${fbMeta.featureBranch} pushed, PR created: ${fbMeta.prUrl}`
+            : `branch ${fbMeta.featureBranch || "unknown"} workflow: push=${fbMeta.pushResult || "n/a"}, pr=${fbMeta.prCreation || "n/a"}`,
+          fbMeta
+        );
+      } catch (fbErr) {
+        log("warn", "feature-branch-workflow-error", { taskId: task.taskId, err: fbErr.message });
+        result.meta.featureBranchError = fbErr.message;
+        resultBody.meta = result.meta;
+        await sendEvent(task, "completed", "feature_branch",
+          `feature branch workflow failed: ${fbErr.message}`,
+          { featureBranchError: fbErr.message }
+        );
+        // Task remains completed — branch workflow failure is not fatal
+      }
+    }
+
     await apiPost("/api/worker/result", resultBody);
 
     // ── WORKTREE CLEANUP ──
