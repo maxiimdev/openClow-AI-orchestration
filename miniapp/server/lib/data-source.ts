@@ -10,6 +10,9 @@ import { mockTasks, mockEvents } from './mock-data'
 import { orchGetTask, orchResumeTask } from './orch-client'
 import { mapOrchTask, mapOrchEvents } from './orch-mapper'
 import { trackTaskId, getKnownTaskIds, removeTaskId, hasKnownTasks } from './task-cache'
+import { getFeatureFlags } from './feature-flags'
+import { indexTaskArtifacts } from './indexer'
+import { log } from './logger'
 
 export type DataMode = 'mock' | 'orch'
 
@@ -104,11 +107,108 @@ export async function getTask(taskId: string, userId: number): Promise<Task | nu
   try {
     const orch = await orchGetTask(taskId)
     trackTaskId(taskId) // remember for list cache
-    return mapOrchTask(orch)
+    const task = mapOrchTask(orch)
+    tryIndexArtifacts(task)
+    return task
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err)
     if (msg.includes('404')) return null
     throw err
+  }
+}
+
+// ── ARTIFACT INDEXING ─────────────────────────────────────────────────────
+
+/**
+ * Best-effort artifact indexing: if the task has v2 artifacts and indexing
+ * is enabled, index them using preview content (full content requires
+ * a file-serving endpoint on orch-api, not yet available).
+ */
+function tryIndexArtifacts(task: Task): void {
+  const flags = getFeatureFlags()
+  if (!flags.resultV2Enabled || !flags.artifactIndexingEnabled) return
+  if (!task.artifacts?.length) return
+
+  try {
+    const result = indexTaskArtifacts(task.id, task.artifacts, (a) => a.preview)
+    log('info', 'artifacts indexed', {
+      taskId: task.id,
+      indexed_chunks_count: result.totalChunks,
+      artifact_count: result.indexed,
+    })
+  } catch (err) {
+    log('warn', 'artifact indexing failed', {
+      taskId: task.id,
+      error: err instanceof Error ? err.message : String(err),
+    })
+  }
+}
+
+// ── GET TASK DISPLAY ──────────────────────────────────────────────────────
+
+export interface TaskDisplay {
+  task: Task
+  /** Preferred output: v2 summary when available, v1 stdout fallback */
+  displayOutput: string
+  /** Which result version was used */
+  resultSource: 'v2_summary' | 'v1_stdout' | 'none'
+  /** Observability fields */
+  obs: {
+    raw_output_bytes: number
+    summary_bytes: number
+    compression_ratio: number
+  }
+}
+
+/**
+ * Get task with v2-preferred display output. Consumer-facing reads
+ * should use this instead of raw getTask for notification content.
+ */
+export async function getTaskDisplay(taskId: string, userId: number): Promise<TaskDisplay | null> {
+  const task = await getTask(taskId, userId)
+  if (!task) return null
+
+  const flags = getFeatureFlags()
+
+  // v2 summary: use artifact preview concatenation as display output
+  if (flags.resultV2Enabled && task.resultVersion === 2 && task.artifacts?.length) {
+    const summary = task.artifacts
+      .map(a => a.preview)
+      .filter(Boolean)
+      .join('\n---\n')
+
+    const rawBytes = task.result
+      ? Buffer.byteLength(task.result.stdout + task.result.stderr, 'utf8')
+      : 0
+    const summaryBytes = Buffer.byteLength(summary, 'utf8')
+
+    return {
+      task,
+      displayOutput: summary,
+      resultSource: 'v2_summary',
+      obs: {
+        raw_output_bytes: rawBytes,
+        summary_bytes: summaryBytes,
+        compression_ratio: rawBytes > 0 ? summaryBytes / rawBytes : 1,
+      },
+    }
+  }
+
+  // v1 fallback: raw stdout, capped if configured
+  const stdout = task.result?.stdout ?? ''
+  const cap = flags.legacyStdoutCapBytes
+  const capped = stdout.length > cap ? stdout.slice(0, cap) + '\n[truncated]' : stdout
+  const rawBytes = Buffer.byteLength(stdout, 'utf8')
+
+  return {
+    task,
+    displayOutput: capped,
+    resultSource: stdout ? 'v1_stdout' : 'none',
+    obs: {
+      raw_output_bytes: rawBytes,
+      summary_bytes: Buffer.byteLength(capped, 'utf8'),
+      compression_ratio: 1,
+    },
   }
 }
 
