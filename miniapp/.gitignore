@@ -18,6 +18,10 @@ logs
 .fleet
 .idea
 
+# Playwright test artifacts (not baselines)
+e2e/results/
+e2e/test-results/
+
 # Local env files
 .env
 .env.*

@@ -26,6 +26,26 @@ node worker.js
 | `HEARTBEAT_INTERVAL_MS` | `90000` | Keepalive period when Claude is silent |
 | `NEEDS_INPUT_DEBUG` | `false` | Verbose needs_input parsing logs |
 | `REVIEW_MAX_ITERATIONS` | `3` | Default max review iterations for loops |
+| `REPORT_CONTRACT_ENABLED` | `false` | Enable basic report contract (empty/placeholder/short) checks |
+| `REPORT_MIN_LENGTH` | `50` | Minimum report length for contract check |
+| `REPORT_RETRY_ENABLED` | `false` | Retry task once on basic contract violation |
+| `REPORT_SCHEMA_STRICT` | `false` | Enable structured report schema validation |
+| `REPORT_SCHEMA_RETRY_ENABLED` | `false` | Retry task once on schema violation |
+
+### Report schema rules
+
+When `REPORT_SCHEMA_STRICT=true`, reports are validated against structured schemas:
+
+| Schema | Auto-selected when | Required sections |
+|---|---|---|
+| `strict` | Task instructions match: audit, foundation, hardening, refactor, migration | changelog, evidence/commands, test summary, commit hash |
+| `standard` | `REPORT_SCHEMA_STRICT=true` and no strict pattern match | changelog, test summary |
+| `compact` | Never auto-selected (explicit `reportSchema=compact` override only) | *(none)* |
+
+Per-task overrides: `task.reportSchema = "compact" | "standard" | "strict"` overrides auto-detection.
+Per-task opt-out: `task.reportSchemaRetryOnViolation = false` disables schema retry for that task.
+
+On schema violation: emits `report_schema_invalid` event with missing sections, performs one retry if enabled, fails with `report_contract_violation` if still invalid.
 
 ## Event schema
 
@@ -64,6 +84,10 @@ All events are POSTed to `POST /api/worker/event`:
 | `review_fail` | `report` | Review failed; `[REVIEW_FAIL …]` emitted by Claude |
 | `review_loop_fail` | `report` | Intermediate review fail in loop; patch will follow |
 | `escalated` | `report` | Loop exhausted max iterations without passing |
+| `report_contract_invalid` | `report_contract` | Basic report contract violation (empty/placeholder/short) |
+| `report_retry_attempt` | `report_contract` | Retrying task after basic contract violation |
+| `report_schema_invalid` | `report_contract` | Structured schema violation; `meta.missing` lists missing sections |
+| `report_schema_retry_attempt` | `report_contract` | Retrying task after schema violation |
 | `completed` | `report` | Task finished successfully |
 | `failed` | `report` | Task failed |
 

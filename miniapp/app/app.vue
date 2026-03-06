@@ -18,14 +18,14 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="min-h-screen bg-white">
-    <nav class="border-b px-4 py-2">
+  <div class="min-h-screen bg-background text-foreground">
+    <nav class="border-b border-border px-4 py-2">
       <div class="flex items-center justify-between">
         <NuxtLink to="/" class="text-lg font-bold">Worker</NuxtLink>
         <div class="flex gap-3 text-sm">
-          <NuxtLink to="/tasks" class="text-gray-600 hover:text-gray-900">Tasks</NuxtLink>
-          <NuxtLink to="/inbox" class="text-gray-600 hover:text-gray-900">Inbox</NuxtLink>
-          <NuxtLink to="/reviews" class="text-gray-600 hover:text-gray-900">Reviews</NuxtLink>
+          <NuxtLink to="/tasks" class="text-muted-foreground hover:text-foreground">Tasks</NuxtLink>
+          <NuxtLink to="/inbox" class="text-muted-foreground hover:text-foreground">Inbox</NuxtLink>
+          <NuxtLink to="/reviews" class="text-muted-foreground hover:text-foreground">Reviews</NuxtLink>
         </div>
       </div>
     </nav>

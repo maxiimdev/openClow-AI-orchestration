@@ -14,9 +14,9 @@ const summary = computed(() =>
 )
 
 const severityClass: Record<string, string> = {
-  critical: 'bg-red-100 text-red-800',
-  major: 'bg-orange-100 text-orange-800',
-  minor: 'bg-yellow-100 text-yellow-800',
+  critical: 'bg-severity-critical-muted text-severity-critical-foreground',
+  major: 'bg-severity-major-muted text-severity-major-foreground',
+  minor: 'bg-severity-minor-muted text-severity-minor-foreground',
 }
 </script>
 
@@ -26,7 +26,7 @@ const severityClass: Record<string, string> = {
     <StaleIndicator />
 
     <div v-if="isPending" class="space-y-3 mt-4">
-      <div v-for="i in 3" :key="i" class="h-24 rounded-lg bg-gray-100 animate-pulse" />
+      <div v-for="i in 3" :key="i" class="h-24 rounded-lg bg-muted animate-pulse" />
     </div>
 
     <ErrorState v-else-if="error" :message="(error as Error).message" @retry="refetch()" />
@@ -36,16 +36,16 @@ const severityClass: Record<string, string> = {
     <template v-else>
       <!-- Summary chips -->
       <div class="flex gap-2 mt-4 mb-4">
-        <span class="rounded-full bg-gray-100 px-3 py-1 text-xs font-medium text-gray-700">
+        <span class="rounded-full bg-muted px-3 py-1 text-xs font-medium text-muted-foreground">
           {{ summary.total }} total
         </span>
-        <span v-if="summary.passed" class="rounded-full bg-green-100 px-3 py-1 text-xs font-medium text-green-800">
+        <span v-if="summary.passed" class="rounded-full bg-success-muted px-3 py-1 text-xs font-medium text-success-muted-foreground">
           {{ summary.passed }} passed
         </span>
-        <span v-if="summary.failed" class="rounded-full bg-orange-100 px-3 py-1 text-xs font-medium text-orange-800">
+        <span v-if="summary.failed" class="rounded-full bg-severity-major-muted px-3 py-1 text-xs font-medium text-severity-major-foreground">
           {{ summary.failed }} failed
         </span>
-        <span v-if="summary.escalated" class="rounded-full bg-red-100 px-3 py-1 text-xs font-medium text-red-800">
+        <span v-if="summary.escalated" class="rounded-full bg-severity-critical-muted px-3 py-1 text-xs font-medium text-severity-critical-foreground">
           {{ summary.escalated }} escalated
         </span>
       </div>
@@ -55,19 +55,19 @@ const severityClass: Record<string, string> = {
         <NuxtLink
           v-for="task in reviewTasks" :key="task.id"
           :to="`/tasks/${task.id}`"
-          class="block rounded-lg border p-4 hover:bg-gray-50 transition-colors"
+          class="block rounded-lg border p-4 hover:bg-accent transition-colors"
         >
           <div class="flex items-center justify-between">
-            <span class="font-mono text-sm text-gray-600">{{ truncateId(task.id) }}</span>
+            <span class="font-mono text-sm text-muted-foreground">{{ truncateId(task.id) }}</span>
             <StatusBadge :status="task.status" />
           </div>
 
           <div class="mt-2 flex items-center gap-2 text-sm">
-            <span class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-medium">{{ task.mode }}</span>
-            <span v-if="task.branch" class="text-gray-500 truncate">{{ task.branch }}</span>
+            <span class="rounded bg-muted px-1.5 py-0.5 text-xs font-medium">{{ task.mode }}</span>
+            <span v-if="task.branch" class="text-muted-foreground truncate">{{ task.branch }}</span>
           </div>
 
-          <p class="mt-2 text-sm text-gray-600">{{ getReviewCardSummary(task) }}</p>
+          <p class="mt-2 text-sm text-muted-foreground">{{ getReviewCardSummary(task) }}</p>
 
           <!-- Severity breakdown for tasks with structured findings -->
           <div v-if="task.structuredFindings?.length" class="mt-2 flex gap-1.5">
@@ -82,7 +82,7 @@ const severityClass: Record<string, string> = {
             </template>
           </div>
 
-          <div class="mt-2 text-xs text-gray-400">
+          <div class="mt-2 text-xs text-muted-foreground/70">
             {{ formatRelativeTime(task.updatedAt) }}
           </div>
         </NuxtLink>

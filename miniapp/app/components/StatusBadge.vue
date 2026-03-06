@@ -5,12 +5,12 @@ import { getStatusLabel, getStatusColor } from '~/lib/mappers'
 const props = defineProps<{ status: UserStatus }>()
 
 const colorClasses: Record<string, string> = {
-  blue: 'bg-blue-100 text-blue-800',
-  green: 'bg-green-100 text-green-800',
-  red: 'bg-red-100 text-red-800',
-  amber: 'bg-amber-100 text-amber-800',
-  orange: 'bg-orange-100 text-orange-800',
-  gray: 'bg-gray-100 text-gray-800',
+  blue: 'bg-info-muted text-info-muted-foreground',
+  green: 'bg-success-muted text-success-muted-foreground',
+  red: 'bg-severity-critical-muted text-severity-critical-foreground',
+  amber: 'bg-warning-muted text-warning-muted-foreground',
+  orange: 'bg-severity-major-muted text-severity-major-foreground',
+  gray: 'bg-muted text-muted-foreground',
 }
 
 const badgeClass = computed(() => {
