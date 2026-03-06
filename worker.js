@@ -1619,6 +1619,98 @@ function gitCheckout(cwd, branch) {
   });
 }
 
+// ── WORKTREE ───────────────────────────────────────────────────────────────────
+
+const WORKTREE_BASE_DIR = ".worktrees";
+
+function worktreePath(repoPath, taskId) {
+  return path.join(repoPath, WORKTREE_BASE_DIR, taskId);
+}
+
+function gitGetBaseCommit(cwd) {
+  return new Promise((resolve, reject) => {
+    const child = spawn("git", ["rev-parse", "HEAD"], {
+      cwd,
+      shell: false,
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 10000,
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (c) => (stdout += c));
+    child.stderr.on("data", (c) => (stderr += c));
+    child.on("close", (code) => {
+      if (code === 0) resolve(stdout.trim());
+      else reject(new Error(`git rev-parse HEAD failed (${code}): ${stderr.trim()}`));
+    });
+    child.on("error", reject);
+  });
+}
+
+async function createWorktree(repoPath, taskId, branch) {
+  const wtPath = worktreePath(repoPath, taskId);
+  // Ensure parent dir exists
+  const parentDir = path.dirname(wtPath);
+  if (!fs.existsSync(parentDir)) {
+    fs.mkdirSync(parentDir, { recursive: true });
+  }
+
+  return new Promise((resolve, reject) => {
+    const child = spawn("git", ["worktree", "add", "-B", branch, wtPath], {
+      cwd: repoPath,
+      shell: false,
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 30000,
+    });
+    let stderr = "";
+    child.stderr.on("data", (c) => (stderr += c));
+    child.on("close", (code) => {
+      if (code === 0) resolve(wtPath);
+      else reject(new Error(`git worktree add failed (${code}): ${stderr.trim()}`));
+    });
+    child.on("error", reject);
+  });
+}
+
+async function removeWorktree(repoPath, taskId) {
+  const wtPath = worktreePath(repoPath, taskId);
+  try {
+    await new Promise((resolve, reject) => {
+      const child = spawn("git", ["worktree", "remove", "--force", wtPath], {
+        cwd: repoPath,
+        shell: false,
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout: 15000,
+      });
+      let stderr = "";
+      child.stderr.on("data", (c) => (stderr += c));
+      child.on("close", (code) => {
+        if (code === 0) resolve();
+        else reject(new Error(`git worktree remove failed (${code}): ${stderr.trim()}`));
+      });
+      child.on("error", reject);
+    });
+  } catch (err) {
+    // Failure-safe: log warning but do not crash
+    log("warn", "worktree cleanup failed", { repoPath, taskId, err: err.message });
+    // Fallback: try to remove directory manually
+    try {
+      if (fs.existsSync(wtPath)) {
+        fs.rmSync(wtPath, { recursive: true, force: true });
+      }
+      // Prune stale worktree entries
+      spawn("git", ["worktree", "prune"], {
+        cwd: repoPath,
+        shell: false,
+        stdio: "ignore",
+        timeout: 10000,
+      });
+    } catch (cleanupErr) {
+      log("warn", "worktree fallback cleanup also failed", { repoPath, taskId, err: cleanupErr.message });
+    }
+  }
+}
+
 // ── MAIN LOOP ──────────────────────────────────────────────────────────────────
 
 let shuttingDown = false;
@@ -1643,6 +1735,8 @@ async function mainLoop() {
 
   while (!shuttingDown) {
     let task = null;
+    let worktreeInfo = null;
+    let originalRepoPath = null;
     try {
       // ── PULL ──
       const pullRes = await apiPost("/api/worker/pull", {
@@ -1714,6 +1808,42 @@ async function mainLoop() {
         stepTotal,
       });
 
+      // ── WORKTREE SETUP ──
+      originalRepoPath = task.scope?.repoPath;
+      if (task.useWorktree && task.scope && task.scope.repoPath) {
+        const baseRepo = path.resolve(task.scope.repoPath);
+        try {
+          const baseCommit = await gitGetBaseCommit(baseRepo);
+          const wtPath = await createWorktree(baseRepo, task.taskId, task.scope.branch);
+          worktreeInfo = {
+            worktreePath: wtPath,
+            branch: task.scope.branch,
+            baseCommit,
+            baseRepoPath: baseRepo,
+          };
+          // Override repoPath so executeTask runs inside the worktree
+          task.scope.repoPath = wtPath;
+          log("info", "worktree created", { taskId: task.taskId, wtPath, baseCommit, branch: task.scope.branch });
+          await sendEvent(task, "progress", "worktree", `worktree created at ${wtPath}`, {
+            worktreePath: wtPath,
+            baseCommit,
+            branch: task.scope.branch,
+          });
+        } catch (wtErr) {
+          log("error", "worktree creation failed", { taskId: task.taskId, err: wtErr.message });
+          await sendEvent(task, "failed", "worktree", `worktree creation failed: ${wtErr.message}`);
+          await apiPost("/api/worker/result", {
+            workerId: CFG.workerId,
+            taskId: task.taskId,
+            status: "failed",
+            mode: task.mode,
+            output: { stdout: "", stderr: `worktree creation failed: ${wtErr.message}`, truncated: false },
+            meta: { durationMs: 0, repoPath: baseRepo, branch: task.scope.branch },
+          }).catch((e) => log("error", "failed to report worktree failure", { err: e.message }));
+          continue;
+        }
+      }
+
       // ── EXECUTE ──
       const stepCtxMain = { gitStep, claudeStep, stepTotal };
       let result;
@@ -1725,6 +1855,13 @@ async function mainLoop() {
         result = await executeIsolatedReview(task, stepCtxMain);
       } else {
         result = await executeTask(task, stepCtxMain);
+      }
+
+      // Attach worktree metadata to result
+      if (worktreeInfo) {
+        result.meta.worktreePath = worktreeInfo.worktreePath;
+        result.meta.baseCommit = worktreeInfo.baseCommit;
+        result.meta.worktreeBranch = worktreeInfo.branch;
       }
 
       // ── LEASE CHECK (Stage 5) ──
@@ -1916,12 +2053,30 @@ async function mainLoop() {
       }
       await apiPost("/api/worker/result", resultBody);
 
+      // ── WORKTREE CLEANUP ──
+      if (worktreeInfo && !task.keepWorktree) {
+        // Restore original repoPath before cleanup
+        task.scope.repoPath = originalRepoPath;
+        await removeWorktree(worktreeInfo.baseRepoPath, task.taskId);
+        log("info", "worktree removed", { taskId: task.taskId, wtPath: worktreeInfo.worktreePath });
+      } else if (worktreeInfo && task.keepWorktree) {
+        log("info", "worktree kept (keepWorktree=true)", { taskId: task.taskId, wtPath: worktreeInfo.worktreePath });
+      }
+
       // Stage 5: clean up lease + nonce
       stopLeaseRenewal();
       resetExecutionNonce();
 
       resetBackoff();
     } catch (err) {
+      // Worktree cleanup on error
+      if (worktreeInfo && !task.keepWorktree) {
+        try { task.scope.repoPath = originalRepoPath; } catch (_) {}
+        await removeWorktree(worktreeInfo.baseRepoPath, task.taskId).catch((wtErr) =>
+          log("warn", "worktree cleanup failed in error handler", { err: wtErr.message })
+        );
+      }
+
       // Stage 5: stop lease on error
       stopLeaseRenewal();
       resetExecutionNonce();
