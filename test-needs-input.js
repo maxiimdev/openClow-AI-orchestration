@@ -128,9 +128,7 @@ const server = http.createServer((req, res) => {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true, task: null }));
 
-      if (pullCount >= 3) {
-        setTimeout(() => finish(), 1500);
-      }
+      // finish triggered by result count, not by timer
       return;
     }
 
@@ -169,6 +167,9 @@ const server = http.createServer((req, res) => {
       }
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true }));
+      if (receivedResults.length >= 2) {
+        process.nextTick(() => finish());
+      }
       return;
     }
 
@@ -179,7 +180,10 @@ const server = http.createServer((req, res) => {
 
 let resumedTask = null;
 
+let _finished = false;
 function finish() {
+  if (_finished) return;
+  _finished = true;
   console.log(color(36, "\n" + "=".repeat(60)));
   console.log(color(36, "TEST RESULTS"));
   console.log(color(36, "=".repeat(60)));

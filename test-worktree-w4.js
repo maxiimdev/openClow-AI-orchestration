@@ -11,7 +11,7 @@
  *   4. Hard-stop mode blocks new claims when threshold exceeded
  *   5. Legacy path unaffected (non-worktree task still works)
  *
- * Port: 9882
+ * Port: dynamic (server.listen(0))
  * Usage: node test-worktree-w4.js
  */
 

@@ -14,7 +14,7 @@
  *   7. [gate] implement + requireReviewGate → reviewGateEnforced telemetry event emitted
  *   8. [gate] review mode completed → review_fail (existing gate still works with flag)
  *
- * Port: 9879 (unique, avoids conflicts with other test suites)
+ * Port: dynamic (server.listen(0))
  *
  * Usage: node test-hard-review-gate.js
  */
@@ -209,9 +209,7 @@ const server = http.createServer((req, res) => {
       }
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true }));
-      if (pullCount >= PULL_SEQUENCE.length + 1) {
-        setTimeout(() => finish(), 1500);
-      }
+      // finish triggered by result count, not by timer
       return;
     }
 
@@ -240,6 +238,9 @@ const server = http.createServer((req, res) => {
       console.log(color(statusColor, `\n[orch] ← result: taskId=${result.taskId} status=${result.status} reviewGateEnforced=${result.meta?.reviewGateEnforced || false}`));
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true }));
+      if (receivedResults.length >= PULL_SEQUENCE.length) {
+        process.nextTick(() => finish());
+      }
       return;
     }
 
@@ -250,7 +251,10 @@ const server = http.createServer((req, res) => {
 
 // ── Finish + assertions ────────────────────────────────────────────────────────
 
+let _finished = false;
 function finish() {
+  if (_finished) return;
+  _finished = true;
   console.log(color(36, "\n" + "=".repeat(60)));
   console.log(color(36, "TEST RESULTS — Hard Review Gate (Stage 2)"));
   console.log(color(36, "=".repeat(60)));

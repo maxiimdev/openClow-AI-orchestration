@@ -11,7 +11,7 @@
  *   4. No duplicate claim under concurrency
  *   5. Backward compatibility when MAX_PARALLEL_WORKTREES=1
  *
- * Port: 9880
+ * Port: dynamic (server.listen(0))
  * Usage: node test-worktree-w2.js
  */
 

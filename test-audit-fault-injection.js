@@ -13,7 +13,7 @@
  *   6. Idempotency: duplicate calls do not duplicate side effects
  *   7. Per-task nonce isolation (W2 concurrency fix regression test)
  *
- * Port: 9884 (unique to this test)
+ * Port: dynamic (server.listen(0))
  */
 
 const http = require("http");

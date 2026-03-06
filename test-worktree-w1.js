@@ -11,7 +11,7 @@
  *   4. Legacy non-worktree task still works (backward compat)
  *   5. Claude runs in worktree path (not base repo)
  *
- * Port: 9879
+ * Port: dynamic (server.listen(0))
  * Usage: node test-worktree-w1.js
  */
 

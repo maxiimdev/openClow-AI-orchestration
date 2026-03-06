@@ -199,9 +199,7 @@ const server = http.createServer((req, res) => {
       console.log(c(33, `[orch] → pull ${pullCount}: no more tasks`));
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true }));
-      if (pullCount >= 2) {
-        setTimeout(() => finish(), 1500);
-      }
+      // finish triggered by result count, not by timer
       return;
     }
 
@@ -238,6 +236,9 @@ const server = http.createServer((req, res) => {
       }
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true }));
+      if (receivedResults.length >= 1) {
+        process.nextTick(() => finish());
+      }
       return;
     }
 
@@ -248,7 +249,10 @@ const server = http.createServer((req, res) => {
 
 // ── Assertions + proof report ──────────────────────────────────────────────────
 
+let _finished = false;
 function finish() {
+  if (_finished) return;
+  _finished = true;
   const elapsed = Date.now() - startTime;
 
   console.log(c(36, "\n" + "═".repeat(64)));

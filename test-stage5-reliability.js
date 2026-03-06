@@ -11,7 +11,7 @@
  *   4. Duplicate request with same idempotency key does not duplicate side effects
  *   5. Legacy task records still readable
  *
- * Port: 9879 (unique to this test)
+ * Port: dynamic (server.listen(0))
  */
 
 const http = require("http");

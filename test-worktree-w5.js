@@ -14,7 +14,7 @@
  *   7. enrichEventMeta merges all required fields
  *   8. Legacy tasks unaffected (non-worktree paths still work)
  *
- * Port: 9883
+ * Port: dynamic (server.listen(0))
  * Usage: node test-worktree-w5.js
  */
 

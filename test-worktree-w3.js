@@ -14,7 +14,7 @@
  *   7. Worktree task WITHOUT mergePolicy is unaffected (backward compat)
  *   8. All gates pass → completed passes through
  *
- * Port: 9881
+ * Port: dynamic (server.listen(0))
  * Usage: node test-worktree-w3.js
  */
 

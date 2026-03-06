@@ -24,7 +24,7 @@
  *     9.  [legacy] plain review (no flags) → review_pass via inline gate
  *     10. [orch]   orchestratedLoop + pass → review_pass (no regression)
  *
- * Port: 9876 (unique)
+ * Port: dynamic (server.listen(0))
  *
  * Usage: node test-flag-combo-hardening.js
  */
@@ -253,9 +253,7 @@ const server = http.createServer((req, res) => {
       }
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true }));
-      if (pullCount >= PULL_SEQUENCE.length + 1) {
-        setTimeout(() => finish(), 2000);
-      }
+      // finish triggered by result count, not by timer
       return;
     }
 
@@ -276,6 +274,9 @@ const server = http.createServer((req, res) => {
       console.log(color(sc, `[orch] <- result: ${result.taskId} status=${result.status} gateEnforced=${result.meta?.reviewGateEnforced || false} isolatedRun=${result.meta?.isolatedRun || false}`));
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true }));
+      if (receivedResults.length >= PULL_SEQUENCE.length) {
+        process.nextTick(() => finish());
+      }
       return;
     }
 
@@ -286,7 +287,10 @@ const server = http.createServer((req, res) => {
 
 // ── Assertions ─────────────────────────────────────────────────────────────────
 
+let _finished = false;
 function finish() {
+  if (_finished) return;
+  _finished = true;
   console.log(color(36, "\n" + "=".repeat(70)));
   console.log(color(36, "TEST RESULTS — Flag-Combination Hardening"));
   console.log(color(36, "=".repeat(70)));

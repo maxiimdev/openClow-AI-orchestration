@@ -155,9 +155,7 @@ const server = http.createServer((req, res) => {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true }));
 
-      if (pullCount >= PULL_SEQUENCE.length + 1) {
-        setTimeout(() => finish(), 1500);
-      }
+      // finish triggered by result count, not by timer
       return;
     }
 
@@ -189,6 +187,9 @@ const server = http.createServer((req, res) => {
       }
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true }));
+      if (receivedResults.length >= PULL_SEQUENCE.length) {
+        process.nextTick(() => finish());
+      }
       return;
     }
 
@@ -199,7 +200,10 @@ const server = http.createServer((req, res) => {
 
 // ── Finish + assertions ───────────────────────────────────────────────────────
 
+let _finished = false;
 function finish() {
+  if (_finished) return;
+  _finished = true;
   console.log(color(36, "\n" + "=".repeat(60)));
   console.log(color(36, "TEST RESULTS — Stage 2 Review Gate"));
   console.log(color(36, "=".repeat(60)));

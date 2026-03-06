@@ -10,7 +10,7 @@
  *   3. Observability fields include exhaustionReason, retryCount, maxRetries.
  *   4. Fatal error → immediate DLQ (existing behavior, verified).
  *
- * Port: 9879 (avoids conflicts with other test files).
+ * Port: dynamic (server.listen(0)).
  *
  * Usage: node test-dlq-exhaustion.js
  */
@@ -109,9 +109,7 @@ const server = http.createServer((req, res) => {
       // After exhaustion, return empty
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true }));
-      if (pullCount >= MAX_RETRIES + 2) {
-        setTimeout(() => finish(), 2000);
-      }
+      // finish triggered by DLQ receipt, not by timer
       return;
     }
 
@@ -125,6 +123,9 @@ const server = http.createServer((req, res) => {
       console.log(color(statusColor, `[orch] ← event: ${ev.status}/${ev.phase} [${ev.taskId}] — ${(ev.message || "").slice(0, 120)}`));
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true }));
+      if (ev.status === "failed" && ev.phase === "dlq") {
+        process.nextTick(() => finish());
+      }
       return;
     }
 
@@ -168,7 +169,10 @@ const server = http.createServer((req, res) => {
 
 // ── Finish + assertions ─────────────────────────────────────────────────────────
 
+let _finished = false;
 function finish() {
+  if (_finished) return;
+  _finished = true;
   console.log(color(36, "\n" + "=".repeat(60)));
   console.log(color(36, "TEST RESULTS — DLQ Exhaustion, Idempotency, Observability"));
   console.log(color(36, "=".repeat(60)));
