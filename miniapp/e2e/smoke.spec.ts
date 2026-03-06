@@ -113,7 +113,7 @@ test.describe('Visual smoke tests', () => {
     // Stat tiles should render
     await expect(page.locator('text=Active')).toBeVisible()
     await expect(page.locator('text=Awaiting Input')).toBeVisible()
-    await expect(page.locator('.text-sm.text-gray-500:has-text("Reviews")')).toBeVisible()
+    await expect(page.locator('.text-sm.text-muted-foreground:has-text("Reviews")')).toBeVisible()
     // Nav bar present
     await expect(page.locator('nav')).toBeVisible()
     await expect(page.locator('nav >> text=Tasks')).toBeVisible()

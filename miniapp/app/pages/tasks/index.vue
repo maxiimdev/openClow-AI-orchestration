@@ -25,14 +25,14 @@ const statuses: (UserStatus | '')[] = ['', 'running', 'at_risk', 'completed', 'f
       v-model="searchQuery"
       type="text"
       placeholder="Search tasks..."
-      class="w-full rounded-md border border-gray-300 px-3 py-2 text-sm mb-3 focus:outline-none focus:ring-1 focus:ring-blue-500"
+      class="w-full rounded-md border border-input bg-background px-3 py-2 text-sm mb-3 focus:outline-none focus:ring-1 focus:ring-ring"
     >
 
     <div class="flex gap-2 overflow-x-auto pb-2">
       <button
         v-for="s in statuses" :key="s"
         class="whitespace-nowrap rounded-full px-3 py-1 text-xs font-medium transition-colors"
-        :class="statusFilter === s ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'"
+        :class="statusFilter === s ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground hover:bg-accent'"
         @click="statusFilter = s"
       >
         {{ s ? getStatusLabel(s) : 'All' }}
@@ -40,7 +40,7 @@ const statuses: (UserStatus | '')[] = ['', 'running', 'at_risk', 'completed', 'f
     </div>
 
     <div v-if="isPending" class="space-y-3 mt-4">
-      <div v-for="i in 5" :key="i" class="h-20 rounded-lg bg-gray-100 animate-pulse" />
+      <div v-for="i in 5" :key="i" class="h-20 rounded-lg bg-muted animate-pulse" />
     </div>
 
     <ErrorState v-else-if="error" :message="(error as Error).message" @retry="refetch()" />

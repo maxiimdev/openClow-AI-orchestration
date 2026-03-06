@@ -17,11 +17,11 @@ const severityColor: Record<string, string> = {
         <span class="rounded-full px-2 py-0.5 text-xs font-medium" :class="severityColor[f.severity] || severityColor.major">
           {{ f.severity }}
         </span>
-        <span class="font-mono text-xs text-gray-500">{{ f.file }}</span>
+        <span class="font-mono text-xs text-muted-foreground">{{ f.file }}</span>
       </div>
       <p class="mt-1 text-sm font-medium">{{ f.issue }}</p>
-      <p class="mt-1 text-xs text-gray-500">Risk: {{ f.risk }}</p>
-      <p class="mt-1 text-xs text-gray-600">Fix: {{ f.required_fix }}</p>
+      <p class="mt-1 text-xs text-muted-foreground">Risk: {{ f.risk }}</p>
+      <p class="mt-1 text-xs text-muted-foreground">Fix: {{ f.required_fix }}</p>
     </div>
   </div>
 </template>

@@ -25,15 +25,15 @@ function getDotClass(status: string) {
     <div v-for="event in events" :key="event.id" class="relative flex gap-3 pb-4">
       <div class="flex flex-col items-center">
         <div class="h-3 w-3 rounded-full mt-1" :class="getDotClass(event.status)"/>
-        <div class="flex-1 w-px bg-gray-200"/>
+        <div class="flex-1 w-px bg-border"/>
       </div>
       <div class="flex-1 pb-2">
         <div class="flex items-center gap-2">
           <span class="text-sm font-medium">{{ getStatusLabel(mapWorkerStatus(event.status as any)) }}</span>
-          <span class="text-xs text-gray-400">{{ event.phase }}</span>
-          <span class="ml-auto text-xs text-gray-400">{{ formatRelativeTime(event.createdAt) }}</span>
+          <span class="text-xs text-muted-foreground">{{ event.phase }}</span>
+          <span class="ml-auto text-xs text-muted-foreground">{{ formatRelativeTime(event.createdAt) }}</span>
         </div>
-        <p v-if="event.message" class="text-sm text-gray-600 mt-0.5">{{ event.message }}</p>
+        <p v-if="event.message" class="text-sm text-muted-foreground mt-0.5">{{ event.message }}</p>
       </div>
     </div>
   </div>
