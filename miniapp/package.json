@@ -12,6 +12,7 @@
     "test:e2e": "npx playwright test",
     "test:visual": "npx playwright test e2e/visual.spec.ts",
     "test:visual:update": "npx playwright test e2e/visual.spec.ts --update-snapshots",
+    "test:visual:gate": "./scripts/visual-diff-gate.sh",
     "lint": "eslint .",
     "typecheck": "vue-tsc --noEmit"
   },
