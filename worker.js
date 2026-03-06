@@ -661,6 +661,150 @@ async function buildReviewTaskWithDiff(task, iteration) {
   };
 }
 
+// ── STAGE 3: CLEAN-CONTEXT REVIEW ISOLATION ──────────────────────────────────
+
+// Get list of changed files with status (A/M/D) via git diff.
+function getChangedFiles(repoPath) {
+  return new Promise((resolve) => {
+    const child = spawn("git", ["diff", "--name-status", "HEAD"], {
+      cwd: repoPath,
+      shell: false,
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 10000,
+    });
+    let out = "";
+    child.stdout.on("data", (c) => { if (out.length < 50000) out += c; });
+    child.on("close", () => {
+      const files = out.trim().split("\n").filter(Boolean).map((line) => {
+        const [status, ...rest] = line.split("\t");
+        return { status: status.trim(), file: rest.join("\t").trim() };
+      });
+      resolve(files);
+    });
+    child.on("error", () => resolve([]));
+  });
+}
+
+// Build an isolated review packet containing only what the reviewer needs.
+// No implementer transcript, instructions, or conversational state leaks through.
+async function buildReviewPacket(task, repoPath) {
+  const [diff, changedFiles] = await Promise.all([
+    getGitDiff(repoPath).catch(() => null),
+    getChangedFiles(repoPath).catch(() => []),
+  ]);
+
+  const packet = {
+    taskId: task.taskId,
+    mode: "review",
+    repoPath,
+    branch: task.scope?.branch || "unknown",
+    changedFiles,
+    diff: (diff || "").slice(0, 30000),
+    checklist: task.checklist || task.constraints || [
+      "No regressions introduced",
+      "Code correctness and logic errors",
+      "Security vulnerabilities (OWASP top 10)",
+      "Error handling coverage",
+      "No dead code or debug artifacts",
+    ],
+    isolationInstruction: "You are an independent code reviewer. You must NOT assume any prior context, conversation history, or implementation intent. Evaluate the code changes purely on their technical merit. Be objective and unbiased. Do not infer or reconstruct the implementer's reasoning — review only what is present in the diff and repository state.",
+    createdAt: new Date().toISOString(),
+  };
+
+  // Add iteration context for re-reviews
+  if (task._reviewIteration && task._reviewIteration > 1) {
+    packet.iterationContext = {
+      iteration: task._reviewIteration,
+      previousFindings: task.previousReviewFindings || null,
+    };
+  }
+
+  return packet;
+}
+
+// Hash a review packet for telemetry proof of isolation.
+function hashReviewPacket(packet) {
+  const serialized = JSON.stringify(packet);
+  return {
+    hash: crypto.createHash("sha256").update(serialized).digest("hex"),
+    size: Buffer.byteLength(serialized, "utf-8"),
+  };
+}
+
+// Build a prompt from an isolated review packet (no task.instructions leak).
+function buildIsolatedReviewPrompt(packet) {
+  const parts = [];
+
+  parts.push(`# Code Review [${packet.taskId}]`);
+  parts.push(`\n${packet.isolationInstruction}`);
+  parts.push(`\nRepo: ${packet.repoPath}`);
+  parts.push(`Branch: ${packet.branch}`);
+
+  if (packet.changedFiles.length > 0) {
+    parts.push(`\n## Changed Files`);
+    for (const f of packet.changedFiles) {
+      parts.push(`- [${f.status}] ${f.file}`);
+    }
+  }
+
+  if (packet.diff) {
+    parts.push(`\n## Diff\n\`\`\`diff\n${packet.diff}\n\`\`\``);
+  }
+
+  if (packet.checklist && packet.checklist.length > 0) {
+    parts.push(`\n## Review Checklist`);
+    for (const item of packet.checklist) {
+      parts.push(`- [ ] ${item}`);
+    }
+  }
+
+  if (packet.iterationContext) {
+    parts.push(`\n## Previous Review Findings (iteration ${packet.iterationContext.iteration})`);
+    parts.push(`Verify whether the following issues from the prior review have been resolved:`);
+    if (packet.iterationContext.previousFindings) {
+      parts.push(packet.iterationContext.previousFindings);
+    }
+  }
+
+  return parts.join("\n");
+}
+
+// Execute a review task in isolated mode: builds review packet, uses isolated prompt,
+// adds telemetry proving no context leakage.
+async function executeIsolatedReview(task, stepCtx) {
+  const repoPath = path.resolve(task.scope.repoPath);
+  const packet = await buildReviewPacket(task, repoPath);
+  const { hash, size } = hashReviewPacket(packet);
+
+  log("info", "isolated_review: built review packet", {
+    taskId: task.taskId,
+    reviewPacketHash: hash,
+    reviewPacketSize: size,
+    changedFilesCount: packet.changedFiles.length,
+    hasDiff: !!packet.diff,
+  });
+
+  // Create a minimal task that carries ONLY the isolated prompt
+  const isolatedTask = {
+    taskId: task.taskId,
+    mode: "review",
+    scope: task.scope,
+    model: task.model,
+    // The prompt is built from the packet, not from task.instructions
+    _isolatedPrompt: buildIsolatedReviewPrompt(packet),
+  };
+
+  const result = await executeTask(isolatedTask, stepCtx);
+
+  // Inject telemetry fields proving isolation
+  result.meta.isolatedRun = true;
+  result.meta.reviewPacketHash = hash;
+  result.meta.reviewPacketSize = size;
+  result.meta.changedFilesCount = packet.changedFiles.length;
+
+  return result;
+}
+
 // ── REVIEW LOOP ───────────────────────────────────────────────────────────────
 
 // Runs the full review-patch-review loop for a task with reviewLoop:true.
@@ -708,15 +852,23 @@ async function runReviewLoop(task, stepCtx) {
     }
 
     // ── REVIEW (fresh context, with diff on re-reviews) ──
-    const reviewTask = iter > 1
+    const reviewTaskBase2 = iter > 1
       ? await buildReviewTaskWithDiff(task, iter)
       : task;
+    const reviewTask = { ...reviewTaskBase2 };
+    // Stage 3 isolation fields — only set when isolatedReview is enabled
+    if (task.isolatedReview) {
+      reviewTask._reviewIteration = iter;
+      reviewTask.previousReviewFindings = currentFindings;
+    }
     await sendEvent(task, "progress", "review_loop",
       `review run (iteration ${iter}/${maxIter})`,
-      { phase: "review", iteration: iter, maxIter }
+      { phase: "review", iteration: iter, maxIter, isolatedReview: !!task.isolatedReview }
     );
-    log("info", "review_loop: review run", { taskId: task.taskId, iter });
-    const reviewResult = await executeTask(reviewTask, stepCtx);
+    log("info", "review_loop: review run", { taskId: task.taskId, iter, isolatedReview: !!task.isolatedReview });
+    const reviewResult = task.isolatedReview
+      ? await executeIsolatedReview(reviewTask, stepCtx)
+      : await executeTask(reviewTask, stepCtx);
     lastOutput = reviewResult.output;
     lastMeta = reviewResult.meta;
 
@@ -899,14 +1051,21 @@ async function runOrchestratedLoop(task, stepCtx) {
       reviewLoop: false,
       orchestratedLoop: false,
     };
+    // Stage 3 isolation fields — only set when isolatedReview is enabled
+    if (task.isolatedReview) {
+      reviewTask._reviewIteration = iter;
+      reviewTask.previousReviewFindings = currentFindings;
+    }
 
     await emitContextReset(task, "review", iter, maxIter);
     await sendEvent(task, "progress", "orchestrate",
       `phase:review (iter ${iter}/${maxIter}) — spawning fresh Claude session`,
-      { phase: "review", iteration: iter, maxIter, contextReset: true }
+      { phase: "review", iteration: iter, maxIter, contextReset: true, isolatedReview: !!task.isolatedReview }
     );
-    log("info", "orchestrated_loop: review run", { taskId: task.taskId, iter });
-    const reviewResult = await executeTask(reviewTask, stepCtx);
+    log("info", "orchestrated_loop: review run", { taskId: task.taskId, iter, isolatedReview: !!task.isolatedReview });
+    const reviewResult = task.isolatedReview
+      ? await executeIsolatedReview(reviewTask, stepCtx)
+      : await executeTask(reviewTask, stepCtx);
 
     const rv = parseReviewVerdict(reviewResult.output.stdout);
     const sf = parseStructuredFindings(reviewResult.output.stdout);
@@ -1050,7 +1209,7 @@ async function executeTask(task, stepCtx) {
     };
   }
 
-  const prompt = buildPrompt(task);
+  const prompt = task._isolatedPrompt || buildPrompt(task);
   const repoPath = path.resolve(task.scope.repoPath);
 
   // checkout branch
@@ -1350,11 +1509,17 @@ async function mainLoop() {
       });
 
       // ── EXECUTE ──
-      const result = task.orchestratedLoop
-        ? await runOrchestratedLoop(task, { gitStep, claudeStep, stepTotal })
-        : (task.reviewLoop && task.mode === "review")
-          ? await runReviewLoop(task, { gitStep, claudeStep, stepTotal })
-          : await executeTask(task, { gitStep, claudeStep, stepTotal });
+      const stepCtxMain = { gitStep, claudeStep, stepTotal };
+      let result;
+      if (task.orchestratedLoop) {
+        result = await runOrchestratedLoop(task, stepCtxMain);
+      } else if (task.reviewLoop && task.mode === "review") {
+        result = await runReviewLoop(task, stepCtxMain);
+      } else if (task.isolatedReview && task.mode === "review") {
+        result = await executeIsolatedReview(task, stepCtxMain);
+      } else {
+        result = await executeTask(task, stepCtxMain);
+      }
 
       // ── NEEDS_INPUT CHECK ──
       // Only structured asks (explicit [NEEDS_INPUT] marker with question field,
