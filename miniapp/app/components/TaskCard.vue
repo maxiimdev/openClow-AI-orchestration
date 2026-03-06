@@ -6,7 +6,7 @@ defineProps<{ task: Task }>()
 </script>
 
 <template>
-  <NuxtLink :to="`/tasks/${task.id}`" class="block rounded-lg border p-4 hover:bg-accent transition-colors">
+  <NuxtLink :to="`/tasks/${task.id}`" class="block rounded-lg border p-4 hover:bg-accent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
     <div class="flex items-center justify-between">
       <span class="font-mono text-sm text-muted-foreground">{{ truncateId(task.id) }}</span>
       <StatusBadge :status="task.status" />

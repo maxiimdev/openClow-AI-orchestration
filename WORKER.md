@@ -45,7 +45,7 @@ When `REPORT_SCHEMA_STRICT=true`, reports are validated against structured schem
 Per-task overrides: `task.reportSchema = "compact" | "standard" | "strict"` overrides auto-detection.
 Per-task opt-out: `task.reportSchemaRetryOnViolation = false` disables schema retry for that task.
 
-On schema violation: emits `report_schema_invalid` event with missing sections, performs one retry if enabled, fails with `report_contract_violation` if still invalid.
+On schema violation: emits `report_schema_invalid` event with missing sections. If the **only** missing sections are `tests` and/or `commit`, attempts deterministic auto-repair by scanning raw stdout for test output and commit hashes. On successful repair: emits `report_schema_repaired` event and keeps `completed` status. If auto-repair fails or missing sections include non-repairable keys (e.g. `changelog`, `evidence`): performs one retry if enabled, fails with `report_contract_violation` if still invalid.
 
 ## Event schema
 
@@ -87,6 +87,7 @@ All events are POSTed to `POST /api/worker/event`:
 | `report_contract_invalid` | `report_contract` | Basic report contract violation (empty/placeholder/short) |
 | `report_retry_attempt` | `report_contract` | Retrying task after basic contract violation |
 | `report_schema_invalid` | `report_contract` | Structured schema violation; `meta.missing` lists missing sections |
+| `report_schema_repaired` | `report_contract` | Auto-repaired missing `tests`/`commit` sections from stdout metadata; `meta.repairedKeys` lists keys |
 | `report_schema_retry_attempt` | `report_contract` | Retrying task after schema violation |
 | `completed` | `report` | Task finished successfully |
 | `failed` | `report` | Task failed |

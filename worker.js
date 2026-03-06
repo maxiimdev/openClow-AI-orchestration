@@ -819,21 +819,95 @@ function validateReportContract(stdout, task) {
 // Structured report schemas by task intent. Each schema lists required section
 // headings (case-insensitive) that must appear in the report text.
 
+// ── CANONICAL SECTION ALIASES ────────────────────────────────────────────────
+// Each canonical key maps to an array of regex patterns that represent
+// synonyms/aliases for that section. Validation checks canonical presence,
+// not exact literal header text.
+const CANONICAL_SECTION_ALIASES = {
+  changelog: {
+    description: "file-level changelog",
+    aliases: [
+      /change\s*log/i,
+      /files?\s*changed/i,
+      /file[.\-\s]*level\s*change/i,
+      /changes?\s*made/i,
+      /modifications?/i,
+      /what\s*changed/i,
+      /updated?\s*files?/i,
+      /diff\s*summary/i,
+      /files?\s*modified/i,
+      /code\s*changes?/i,
+      /^#{1,4}\s*changes?\s*$/im,  // standalone "## Changes" heading
+    ],
+  },
+  evidence: {
+    description: "evidence/commands run",
+    aliases: [
+      /evidence/i,
+      /commands?\s*run/i,
+      /proof/i,
+      /verification\s*steps?/i,
+      /commands?\s*executed/i,
+      /execution\s*log/i,
+      /steps?\s*taken/i,
+      /commands?\s*output/i,
+      /run\s*log/i,
+      /actions?\s*taken/i,
+    ],
+  },
+  tests: {
+    description: "test summary/results",
+    aliases: [
+      /tests?\s*summary/i,
+      /tests?\s*results?/i,
+      /tests?\s*pass/i,
+      /tests?\s*output/i,
+      /tests?\s*outcome/i,
+      /tests?\s*status/i,
+      /tests?\s*report/i,
+      /verification\s*results?/i,
+      /verification\s*summary/i,
+      /testing\s*results?/i,
+      /testing\s*summary/i,
+      /tests?\s*(?:run|executed|completed)/i,
+      /(?:all|unit|integration)\s*tests?\s*pass/i,
+      /\d+\s+(?:tests?\s+)?pass(?:ed|ing)?/i,
+      /\d+\s+(?:tests?\s+)?fail(?:ed|ing)?/i,
+      /Tests?:\s*\d+/i,
+    ],
+  },
+  commit: {
+    description: "commit hash/reference",
+    aliases: [
+      /commit\s*hash/i,
+      /commit\s*sha/i,
+      /commit\s*id/i,
+      /commit[:\s]+[0-9a-f]{7}/i,
+      /pushed?\s*commit/i,
+      /git\s*commit/i,
+      /\bsha[:\s]+[0-9a-f]{7}/i,
+      /\b[0-9a-f]{7,40}\b/,  // bare commit hash
+      /commit\s*reference/i,
+      /commit\s*info/i,
+    ],
+  },
+};
+
 const REPORT_SCHEMAS = {
   strict: {
     label: "strict",
     sections: [
-      { key: "changelog", pattern: /changelog|files?\s*changed|file.level\s*change/i, description: "file-level changelog" },
-      { key: "evidence",  pattern: /evidence|commands?\s*run|proof|verification/i, description: "evidence/commands" },
-      { key: "tests",     pattern: /test\s*summary|test\s*results?|tests?\s*pass/i, description: "test summary" },
-      { key: "commit",    pattern: /commit\s*hash|commit[:\s]+[0-9a-f]{7}/i, description: "commit hash" },
+      { key: "changelog" },
+      { key: "evidence" },
+      { key: "tests" },
+      { key: "commit" },
     ],
   },
   standard: {
     label: "standard",
     sections: [
-      { key: "changelog", pattern: /changelog|files?\s*changed|file.level\s*change/i, description: "file-level changelog" },
-      { key: "tests",     pattern: /test\s*summary|test\s*results?|tests?\s*pass/i, description: "test summary" },
+      { key: "changelog" },
+      { key: "tests" },
     ],
   },
   compact: {
@@ -865,6 +939,16 @@ function resolveReportSchema(task) {
   return null;
 }
 
+function matchCanonicalSection(key, text) {
+  const canon = CANONICAL_SECTION_ALIASES[key];
+  if (!canon) return null;
+  for (const alias of canon.aliases) {
+    const m = alias.exec(text);
+    if (m) return { key, matchedAlias: m[0] };
+  }
+  return null;
+}
+
 function validateReportSchema(stdout, task) {
   const schema = resolveReportSchema(task);
   if (!schema || schema.sections.length === 0) return null;
@@ -873,9 +957,14 @@ function validateReportSchema(stdout, task) {
   if (!resultText) return null; // empty result is caught by validateReportContract
 
   const missing = [];
+  const recognized = [];
   for (const sec of schema.sections) {
-    if (!sec.pattern.test(resultText)) {
-      missing.push({ key: sec.key, description: sec.description });
+    const canon = CANONICAL_SECTION_ALIASES[sec.key];
+    const match = matchCanonicalSection(sec.key, resultText);
+    if (match) {
+      recognized.push(match);
+    } else {
+      missing.push({ key: sec.key, description: canon?.description || sec.key });
     }
   }
 
@@ -885,7 +974,84 @@ function validateReportSchema(stdout, task) {
     reason: "schema_violation",
     schema: schema.label,
     missing,
-    message: `Report schema violation (${schema.label}): missing sections: ${missing.map(m => m.key).join(", ")}`,
+    recognized,
+    message: `Report schema violation (${schema.label}): missing canonical keys: [${missing.map(m => m.key).join(", ")}], recognized: [${recognized.map(r => `${r.key}="${r.matchedAlias}"`).join(", ")}]`,
+  };
+}
+
+// ── REPORT SCHEMA AUTO-REPAIR ──────────────────────────────────────────────
+// When the ONLY missing sections are `tests` and/or `commit`, attempt to
+// synthesize them from the raw stdout (which contains tool-call output,
+// test results, git commands, etc.).  Returns { repairedText, repairedKeys }
+// or null if repair is not possible.
+const AUTOREPAIR_ELIGIBLE_KEYS = new Set(["tests", "commit"]);
+
+function attemptSchemaAutoRepair(stdout, schemaViolation) {
+  // Only auto-repair if every missing key is eligible
+  const missingKeys = schemaViolation.missing.map(m => m.key);
+  if (!missingKeys.every(k => AUTOREPAIR_ELIGIBLE_KEYS.has(k))) return null;
+
+  const resultText = extractClaudeResult(stdout);
+  if (!resultText) return null;
+
+  const repairedKeys = [];
+  const patches = [];
+
+  if (missingKeys.includes("tests")) {
+    // Scan full stdout for test evidence: "N pass", "N fail", exit code, npm/node test
+    const testLines = [];
+    const testPatterns = [
+      /(\d+)\s+(?:tests?\s+)?pass(?:ed|ing)?/i,
+      /(\d+)\s+(?:tests?\s+)?fail(?:ed|ing|ure)?/i,
+      /Tests?:\s*\d+/i,
+      /PASS\s+\S+/,
+      /FAIL\s+\S+/,
+      /✓|✗|✘/,
+      /npm\s+test|node\s+.*test|jest|vitest|mocha/i,
+      /test.*(?:passed|failed|error|ok|success)/i,
+    ];
+    for (const line of stdout.split("\n")) {
+      for (const pat of testPatterns) {
+        if (pat.test(line)) {
+          testLines.push(line.trim().slice(0, 200));
+          break;
+        }
+      }
+    }
+    if (testLines.length > 0) {
+      const unique = [...new Set(testLines)].slice(0, 10);
+      patches.push(`\n\n## Test Summary (auto-repaired)\n${unique.join("\n")}`);
+      repairedKeys.push("tests");
+    }
+  }
+
+  if (missingKeys.includes("commit")) {
+    // Scan stdout for commit hashes — look for 7-40 hex after "commit" keyword or sha-like patterns
+    const commitPatterns = [
+      /\bcommit\s+([0-9a-f]{7,40})\b/i,
+      /\b([0-9a-f]{7,40})\b.*(?:push|commit|HEAD)/i,
+      /(?:push|commit|HEAD).*\b([0-9a-f]{7,40})\b/i,
+    ];
+    let commitHash = null;
+    for (const line of stdout.split("\n")) {
+      for (const pat of commitPatterns) {
+        const m = pat.exec(line);
+        if (m) { commitHash = m[1]; break; }
+      }
+      if (commitHash) break;
+    }
+    if (commitHash) {
+      patches.push(`\n\n## Commit Hash (auto-repaired)\ncommit: ${commitHash}`);
+      repairedKeys.push("commit");
+    }
+  }
+
+  // All missing keys must be repaired — partial repair is not accepted
+  if (repairedKeys.length !== missingKeys.length) return null;
+
+  return {
+    repairedText: resultText + patches.join(""),
+    repairedKeys,
   };
 }
 
@@ -3236,8 +3402,33 @@ async function processTask(task, slotCtx) {
           { schema: schemaViolation.schema, missing: schemaViolation.missing }
         );
 
+        // ── AUTO-REPAIR: try deterministic synthesis before expensive retry ──
+        const repair = attemptSchemaAutoRepair(result.output.stdout, schemaViolation);
+        let schemaRepaired = false;
+        if (repair) {
+          // Build a synthetic stdout with the repaired result text injected
+          const repairedStdout = result.output.stdout.replace(
+            /("result"\s*:\s*")([^]*?)(")/,
+            (match, pre, body, post) => pre + repair.repairedText.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n") + post
+          );
+          const revalidation = validateReportSchema(repairedStdout, task);
+          if (!revalidation) {
+            log("info", "report_schema_repaired", {
+              taskId: task.taskId,
+              repairedKeys: repair.repairedKeys,
+            });
+            await sendEvent(task, "report_schema_repaired", "report_contract",
+              `Auto-repaired report schema: synthesized ${repair.repairedKeys.join(", ")}`,
+              { repairedKeys: repair.repairedKeys, schema: schemaViolation.schema }
+            );
+            result.output.stdout = repairedStdout;
+            result.meta.reportSchemaRepaired = repair.repairedKeys;
+            schemaRepaired = true;
+          }
+        }
+
         let schemaRetried = false;
-        if (CFG.reportSchemaRetryEnabled && task.reportSchemaRetryOnViolation !== false) {
+        if (!schemaRepaired && CFG.reportSchemaRetryEnabled && task.reportSchemaRetryOnViolation !== false) {
           log("info", "report_schema_retry", { taskId: task.taskId });
           const missingList = schemaViolation.missing.map(m => m.description).join(", ");
           await sendEvent(task, "report_schema_retry_attempt", "report_contract",
@@ -3264,7 +3455,7 @@ async function processTask(task, slotCtx) {
           }
         }
 
-        if (!schemaRetried) {
+        if (!schemaRepaired && !schemaRetried) {
           result.status = "failed";
           result.meta.failureReason = "report_contract_violation";
           result.meta.reportSchemaViolation = schemaViolation;

@@ -21,11 +21,11 @@ function getDotClass(status: string) {
 </script>
 
 <template>
-  <div class="space-y-0">
-    <div v-for="event in events" :key="event.id" class="relative flex gap-3 pb-4">
-      <div class="flex flex-col items-center">
+  <div class="space-y-0" role="list" aria-label="Event timeline">
+    <div v-for="(event, idx) in events" :key="event.id" role="listitem" class="relative flex gap-3 pb-4">
+      <div class="flex flex-col items-center" aria-hidden="true">
         <div class="h-3 w-3 rounded-full mt-1" :class="getDotClass(event.status)"/>
-        <div class="flex-1 w-px bg-border"/>
+        <div v-if="idx < events.length - 1" class="flex-1 w-px bg-border"/>
       </div>
       <div class="flex-1 pb-2">
         <div class="flex items-center gap-2">

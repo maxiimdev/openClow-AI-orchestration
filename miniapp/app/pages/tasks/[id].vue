@@ -15,7 +15,7 @@ const events = computed(() => eventsData.value?.events ?? [])
 <template>
   <div class="p-4">
     <StaleIndicator class="mb-2" />
-    <NuxtLink to="/tasks" class="text-sm text-info hover:underline mb-4 inline-block">&larr; Tasks</NuxtLink>
+    <NuxtLink to="/tasks" class="text-sm text-info hover:underline mb-4 inline-block focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded">&larr; Tasks</NuxtLink>
 
     <div v-if="taskPending" class="space-y-4">
       <div class="h-32 rounded-lg bg-muted animate-pulse" />
@@ -50,7 +50,7 @@ const events = computed(() => eventsData.value?.events ?? [])
 
       <!-- Result -->
       <div v-if="task.result" class="rounded-lg border p-4 mb-4">
-        <h3 class="text-sm font-medium mb-2">Result</h3>
+        <h2 class="text-sm font-medium mb-2">Result</h2>
         <div class="flex items-center gap-3 text-sm">
           <span :class="task.result.exitCode === 0 ? 'text-success' : 'text-destructive'" class="font-mono">
             exit {{ task.result.exitCode }}
@@ -64,12 +64,12 @@ const events = computed(() => eventsData.value?.events ?? [])
 
       <!-- Findings -->
       <div v-if="task.structuredFindings?.length" class="mb-4">
-        <h3 class="text-sm font-medium mb-2">Review Findings</h3>
+        <h2 class="text-sm font-medium mb-2">Review Findings</h2>
         <FindingsPanel :findings="task.structuredFindings" />
       </div>
 
       <!-- Timeline -->
-      <h3 class="text-sm font-medium mb-2">Event Timeline</h3>
+      <h2 class="text-sm font-medium mb-2">Event Timeline</h2>
       <div v-if="eventsPending" class="space-y-2">
         <div v-for="i in 5" :key="i" class="h-12 rounded bg-muted animate-pulse" />
       </div>

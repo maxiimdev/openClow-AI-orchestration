@@ -25,14 +25,16 @@ const statuses: (UserStatus | '')[] = ['', 'running', 'at_risk', 'completed', 'f
       v-model="searchQuery"
       type="text"
       placeholder="Search tasks..."
+      aria-label="Search tasks"
       class="w-full rounded-md border border-input bg-background px-3 py-2 text-sm mb-3 focus:outline-none focus:ring-1 focus:ring-ring"
     >
 
-    <div class="flex gap-2 overflow-x-auto pb-2">
+    <div class="flex gap-2 overflow-x-auto pb-2" role="group" aria-label="Filter by status">
       <button
         v-for="s in statuses" :key="s"
-        class="whitespace-nowrap rounded-full px-3 py-1 text-xs font-medium transition-colors"
+        class="whitespace-nowrap rounded-full px-3 py-1 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         :class="statusFilter === s ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground hover:bg-accent'"
+        :aria-pressed="statusFilter === s"
         @click="statusFilter = s"
       >
         {{ s ? getStatusLabel(s) : 'All' }}
