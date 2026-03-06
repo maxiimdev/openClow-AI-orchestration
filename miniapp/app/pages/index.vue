@@ -28,15 +28,15 @@ const reviewSummary = computed(() =>
 
     <div v-else class="grid grid-cols-3 gap-4 mt-4">
       <NuxtLink to="/tasks" class="rounded-lg border p-4 text-center hover:bg-accent">
-        <div class="text-3xl font-bold text-blue-600">{{ activeTasks }}</div>
+        <div class="text-3xl font-bold text-info">{{ activeTasks }}</div>
         <div class="text-sm text-muted-foreground mt-1">Active</div>
       </NuxtLink>
       <NuxtLink to="/inbox" class="rounded-lg border p-4 text-center hover:bg-accent">
-        <div class="text-3xl font-bold text-amber-600">{{ pendingInput }}</div>
+        <div class="text-3xl font-bold text-warning">{{ pendingInput }}</div>
         <div class="text-sm text-muted-foreground mt-1">Awaiting Input</div>
       </NuxtLink>
       <NuxtLink to="/reviews" class="rounded-lg border p-4 text-center hover:bg-accent">
-        <div class="text-3xl font-bold" :class="reviewSummary.escalated ? 'text-red-600' : reviewSummary.failed ? 'text-orange-600' : 'text-green-600'">
+        <div class="text-3xl font-bold" :class="reviewSummary.escalated ? 'text-destructive' : reviewSummary.failed ? 'text-severity-major' : 'text-success'">
           {{ reviewSummary.total }}
         </div>
         <div class="text-sm text-muted-foreground mt-1">Reviews</div>
@@ -44,10 +44,10 @@ const reviewSummary = computed(() =>
     </div>
 
     <div class="mt-6 space-y-2">
-      <NuxtLink to="/tasks" class="block rounded-lg border p-3 text-center text-sm font-medium text-blue-600 hover:bg-blue-50">
+      <NuxtLink to="/tasks" class="block rounded-lg border p-3 text-center text-sm font-medium text-info hover:bg-accent">
         All Tasks
       </NuxtLink>
-      <NuxtLink to="/reviews" class="block rounded-lg border p-3 text-center text-sm font-medium text-blue-600 hover:bg-blue-50">
+      <NuxtLink to="/reviews" class="block rounded-lg border p-3 text-center text-sm font-medium text-info hover:bg-accent">
         Review Center
       </NuxtLink>
     </div>

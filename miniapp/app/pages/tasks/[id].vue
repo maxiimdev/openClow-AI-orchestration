@@ -15,7 +15,7 @@ const events = computed(() => eventsData.value?.events ?? [])
 <template>
   <div class="p-4">
     <StaleIndicator class="mb-2" />
-    <NuxtLink to="/tasks" class="text-sm text-blue-600 hover:underline mb-4 inline-block">&larr; Tasks</NuxtLink>
+    <NuxtLink to="/tasks" class="text-sm text-info hover:underline mb-4 inline-block">&larr; Tasks</NuxtLink>
 
     <div v-if="taskPending" class="space-y-4">
       <div class="h-32 rounded-lg bg-muted animate-pulse" />
@@ -52,14 +52,14 @@ const events = computed(() => eventsData.value?.events ?? [])
       <div v-if="task.result" class="rounded-lg border p-4 mb-4">
         <h3 class="text-sm font-medium mb-2">Result</h3>
         <div class="flex items-center gap-3 text-sm">
-          <span :class="task.result.exitCode === 0 ? 'text-green-600' : 'text-red-600'" class="font-mono">
+          <span :class="task.result.exitCode === 0 ? 'text-success' : 'text-destructive'" class="font-mono">
             exit {{ task.result.exitCode }}
           </span>
           <span v-if="task.result.durationMs > 0" class="text-muted-foreground">{{ (task.result.durationMs / 1000).toFixed(1) }}s</span>
-          <span v-if="task.result.truncated" class="text-amber-500 text-xs">(truncated)</span>
+          <span v-if="task.result.truncated" class="text-warning text-xs">(truncated)</span>
         </div>
         <pre v-if="task.result.stdout" class="mt-2 text-xs bg-muted rounded p-2 overflow-x-auto max-h-48 overflow-y-auto">{{ task.result.stdout }}</pre>
-        <pre v-if="task.result.stderr" class="mt-2 text-xs bg-red-50 text-red-800 rounded p-2 overflow-x-auto max-h-32 overflow-y-auto">{{ task.result.stderr }}</pre>
+        <pre v-if="task.result.stderr" class="mt-2 text-xs bg-severity-critical-muted text-severity-critical-foreground rounded p-2 overflow-x-auto max-h-32 overflow-y-auto">{{ task.result.stderr }}</pre>
       </div>
 
       <!-- Findings -->

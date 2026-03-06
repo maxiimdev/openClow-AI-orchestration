@@ -45,6 +45,27 @@ describe('CSS pipeline sanity', () => {
       '--color-border',
       '--color-input',
       '--color-ring',
+      '--color-success',
+      '--color-success-foreground',
+      '--color-success-muted',
+      '--color-success-muted-foreground',
+      '--color-warning',
+      '--color-warning-foreground',
+      '--color-warning-muted',
+      '--color-warning-muted-foreground',
+      '--color-info',
+      '--color-info-foreground',
+      '--color-info-muted',
+      '--color-info-muted-foreground',
+      '--color-severity-critical',
+      '--color-severity-critical-muted',
+      '--color-severity-critical-foreground',
+      '--color-severity-major',
+      '--color-severity-major-muted',
+      '--color-severity-major-foreground',
+      '--color-severity-minor',
+      '--color-severity-minor-muted',
+      '--color-severity-minor-foreground',
       '--radius',
     ]
     for (const token of requiredTokens) {
@@ -66,29 +87,28 @@ describe('CSS pipeline sanity', () => {
   })
 })
 
-describe('no raw gray classes in general UI chrome', () => {
+describe('no raw Tailwind palette colors in app code', () => {
   const vueFiles = collectVueFiles(APP_DIR)
 
-  // These patterns indicate general UI chrome that should use tokens.
-  // We exclude StatusBadge and severity maps (which use semantic status colors).
-  const rawGrayPatterns = [
-    /\bbg-white\b/,
-    /\bborder-gray-\d+\b/,
-  ]
+  // Match any raw Tailwind color palette class (bg-red-500, text-blue-100, border-amber-200, etc.)
+  const rawPalettePattern = /\b(?:bg|text|border|ring|outline)-(red|blue|green|amber|orange|yellow|gray|white|slate|zinc|stone|neutral|emerald|teal|cyan|sky|indigo|violet|purple|fuchsia|pink|rose|lime)-\d{2,3}\b/
 
   for (const file of vueFiles) {
     const relPath = file.replace(APP_DIR + '/', '')
     const content = readFileSync(file, 'utf-8')
 
-    // Extract only template sections for checking
-    const templateMatch = content.match(/<template>([\s\S]*?)<\/template>/)
-    if (!templateMatch) continue
-    const template = templateMatch[1]
-
-    for (const pattern of rawGrayPatterns) {
-      it(`${relPath} template does not use ${pattern.source}`, () => {
-        expect(template).not.toMatch(pattern)
-      })
-    }
+    it(`${relPath} does not use raw Tailwind palette colors`, () => {
+      // Check both template and script sections (for dynamic class maps)
+      expect(content, `${relPath} contains raw palette color`).not.toMatch(rawPalettePattern)
+    })
   }
+
+  it('no bg-white in templates', () => {
+    for (const file of vueFiles) {
+      const content = readFileSync(file, 'utf-8')
+      const templateMatch = content.match(/<template>([\s\S]*?)<\/template>/)
+      if (!templateMatch) continue
+      expect(templateMatch[1]).not.toMatch(/\bbg-white\b/)
+    }
+  })
 })

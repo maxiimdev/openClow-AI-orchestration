@@ -5,12 +5,12 @@ import { mapWorkerStatus, getStatusLabel, getStatusColor, formatRelativeTime } f
 defineProps<{ events: TaskEvent[] }>()
 
 const dotColor: Record<string, string> = {
-  blue: 'bg-blue-500',
-  green: 'bg-green-500',
-  red: 'bg-red-500',
-  amber: 'bg-amber-500',
-  orange: 'bg-orange-500',
-  gray: 'bg-gray-500',
+  blue: 'bg-info',
+  green: 'bg-success',
+  red: 'bg-severity-critical',
+  amber: 'bg-warning',
+  orange: 'bg-severity-major',
+  gray: 'bg-muted-foreground',
 }
 
 function getDotClass(status: string) {

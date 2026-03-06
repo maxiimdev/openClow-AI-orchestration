@@ -4,9 +4,9 @@ import type { Finding } from '~/lib/types'
 defineProps<{ findings: Finding[] }>()
 
 const severityColor: Record<string, string> = {
-  critical: 'bg-red-100 text-red-800',
-  major: 'bg-orange-100 text-orange-800',
-  minor: 'bg-yellow-100 text-yellow-800',
+  critical: 'bg-severity-critical-muted text-severity-critical-foreground',
+  major: 'bg-severity-major-muted text-severity-major-foreground',
+  minor: 'bg-severity-minor-muted text-severity-minor-foreground',
 }
 </script>
 

@@ -14,9 +14,9 @@ const summary = computed(() =>
 )
 
 const severityClass: Record<string, string> = {
-  critical: 'bg-red-100 text-red-800',
-  major: 'bg-orange-100 text-orange-800',
-  minor: 'bg-yellow-100 text-yellow-800',
+  critical: 'bg-severity-critical-muted text-severity-critical-foreground',
+  major: 'bg-severity-major-muted text-severity-major-foreground',
+  minor: 'bg-severity-minor-muted text-severity-minor-foreground',
 }
 </script>
 
@@ -39,13 +39,13 @@ const severityClass: Record<string, string> = {
         <span class="rounded-full bg-muted px-3 py-1 text-xs font-medium text-muted-foreground">
           {{ summary.total }} total
         </span>
-        <span v-if="summary.passed" class="rounded-full bg-green-100 px-3 py-1 text-xs font-medium text-green-800">
+        <span v-if="summary.passed" class="rounded-full bg-success-muted px-3 py-1 text-xs font-medium text-success-muted-foreground">
           {{ summary.passed }} passed
         </span>
-        <span v-if="summary.failed" class="rounded-full bg-orange-100 px-3 py-1 text-xs font-medium text-orange-800">
+        <span v-if="summary.failed" class="rounded-full bg-severity-major-muted px-3 py-1 text-xs font-medium text-severity-major-foreground">
           {{ summary.failed }} failed
         </span>
-        <span v-if="summary.escalated" class="rounded-full bg-red-100 px-3 py-1 text-xs font-medium text-red-800">
+        <span v-if="summary.escalated" class="rounded-full bg-severity-critical-muted px-3 py-1 text-xs font-medium text-severity-critical-foreground">
           {{ summary.escalated }} escalated
         </span>
       </div>
