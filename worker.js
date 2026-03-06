@@ -44,6 +44,15 @@ const CFG = {
   reviewMaxIterations: int("REVIEW_MAX_ITERATIONS", 3),
   orchestratedLoopEnabled:
     (process.env.ORCHESTRATED_LOOP_ENABLED || "true").toLowerCase() === "true",
+  // Stage 5: anti-hang & reliability
+  leaseTtlMs: int("LEASE_TTL_MS", 300000),              // 5 min default lease
+  leaseRenewIntervalMs: int("LEASE_RENEW_INTERVAL_MS", 60000), // renew every 60s
+  maxRetries: int("MAX_RETRIES", 3),                     // transient error retries
+  retryBackoffBaseMs: int("RETRY_BACKOFF_BASE_MS", 1000), // exponential backoff base
+  dlqEnabled:
+    (process.env.DLQ_ENABLED || "true").toLowerCase() === "true",
+  idempotencyEnabled:
+    (process.env.IDEMPOTENCY_ENABLED || "true").toLowerCase() === "true",
 };
 
 const STDOUT_LIMIT = 200 * 1024;
@@ -160,9 +169,147 @@ function niDebug(msg, meta = {}) {
   log("debug", `[ni] ${msg}`, meta);
 }
 
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+// ── STAGE 5: TRANSIENT ERROR CLASSIFICATION ────────────────────────────────────
+
+function isTransientError(err) {
+  if (!err) return false;
+  const msg = err.message || "";
+  // Network-level errors
+  if (/ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENETUNREACH|EAI_AGAIN|EPIPE|socket hang up/i.test(msg)) return true;
+  // HTTP 5xx or 429 (rate limit)
+  const httpMatch = msg.match(/HTTP (\d+)/);
+  if (httpMatch) {
+    const code = parseInt(httpMatch[1], 10);
+    return code >= 500 || code === 429;
+  }
+  // fetch abort/timeout
+  if (/aborted|timeout/i.test(msg) && !/CLAUDE_TIMEOUT/i.test(msg)) return true;
+  return false;
+}
+
+// ── STAGE 5: IDEMPOTENCY ───────────────────────────────────────────────────────
+
+function generateIdempotencyKey(taskId, endpoint, suffix) {
+  const raw = `${taskId}:${endpoint}:${suffix || crypto.randomUUID()}`;
+  return crypto.createHash("sha256").update(raw).digest("hex").slice(0, 32);
+}
+
+// Per-task execution nonce — unique per pull+execute cycle.
+// Used to dedup /result and /event calls for the same task execution.
+let _currentExecutionNonce = null;
+
+function getExecutionNonce(taskId) {
+  if (!_currentExecutionNonce || _currentExecutionNonce.taskId !== taskId) {
+    _currentExecutionNonce = { taskId, nonce: crypto.randomUUID() };
+  }
+  return _currentExecutionNonce.nonce;
+}
+
+function resetExecutionNonce() {
+  _currentExecutionNonce = null;
+}
+
+// ── STAGE 5: DEAD-LETTER QUEUE ─────────────────────────────────────────────────
+
+async function sendToDeadLetter(task, error, retryCount, context) {
+  if (!CFG.dlqEnabled) {
+    log("warn", "dlq-disabled: would have sent to DLQ", {
+      taskId: task?.taskId, error: error?.message,
+    });
+    return;
+  }
+  const dlqPayload = {
+    workerId: CFG.workerId,
+    taskId: task?.taskId || "unknown",
+    failureReason: error?.message || "unknown error",
+    errorClass: isTransientError(error) ? "transient_exhausted" : "fatal",
+    retryCount,
+    lastError: {
+      message: error?.message || null,
+      stack: (error?.stack || "").slice(0, 2000),
+    },
+    taskSnapshot: task ? {
+      mode: task.mode,
+      taskId: task.taskId,
+      scope: task.scope || null,
+    } : null,
+    context: context || null,
+    dlqAt: new Date().toISOString(),
+  };
+
+  log("error", "dlq-transition", {
+    taskId: dlqPayload.taskId,
+    failureReason: dlqPayload.failureReason,
+    errorClass: dlqPayload.errorClass,
+    retryCount,
+  });
+
+  try {
+    await apiPostRaw("/api/worker/dead-letter", dlqPayload);
+  } catch (dlqErr) {
+    log("error", "dlq-post-failed", {
+      taskId: dlqPayload.taskId,
+      err: dlqErr.message,
+    });
+  }
+}
+
+// ── STAGE 5: LEASE MANAGEMENT ──────────────────────────────────────────────────
+
+let _leaseTimer = null;
+let _leaseTaskId = null;
+let _leaseExpired = false;
+
+function startLeaseRenewal(taskId) {
+  stopLeaseRenewal();
+  _leaseTaskId = taskId;
+  _leaseExpired = false;
+  const renewMs = CFG.leaseRenewIntervalMs;
+  const ttlMs = CFG.leaseTtlMs;
+
+  log("info", "lease-start", { taskId, ttlMs, renewMs });
+
+  _leaseTimer = setInterval(async () => {
+    if (_leaseExpired) return;
+    try {
+      const res = await apiPostRaw("/api/worker/lease-renew", {
+        workerId: CFG.workerId,
+        taskId,
+        leaseTtlMs: ttlMs,
+      });
+      if (res && res.expired) {
+        _leaseExpired = true;
+        log("warn", "lease-expired-server", { taskId });
+        stopLeaseRenewal();
+      } else {
+        log("debug", "lease-renewed", { taskId });
+      }
+    } catch (err) {
+      log("warn", "lease-renew-failed", { taskId, err: err.message });
+    }
+  }, renewMs);
+}
+
+function stopLeaseRenewal() {
+  if (_leaseTimer) {
+    clearInterval(_leaseTimer);
+    _leaseTimer = null;
+  }
+  _leaseTaskId = null;
+}
+
+function isLeaseExpired() {
+  return _leaseExpired;
+}
+
 // ── HTTP (native fetch, Node 18+) ──────────────────────────────────────────────
 
-async function apiPost(endpoint, body) {
+// Raw API post — no retry, no idempotency. Used by internal infra (lease, DLQ).
+async function apiPostRaw(endpoint, body) {
   const url = `${CFG.orchBaseUrl}${endpoint}`;
   const res = await fetch(url, {
     method: "POST",
@@ -178,6 +325,63 @@ async function apiPost(endpoint, body) {
     throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`);
   }
   return res.json();
+}
+
+async function apiPost(endpoint, body, opts = {}) {
+  const maxRetries = opts.retries ?? CFG.maxRetries;
+  const taskId = body?.taskId || "unknown";
+
+  // Attach idempotency key for write endpoints
+  if (CFG.idempotencyEnabled && !body._idempotencyKey) {
+    const writeEndpoints = ["/api/worker/event", "/api/worker/result"];
+    if (writeEndpoints.some((e) => endpoint.includes(e))) {
+      const nonce = getExecutionNonce(taskId);
+      const suffix = `${nonce}:${endpoint}:${body?.status || ""}:${body?.phase || ""}`;
+      body._idempotencyKey = generateIdempotencyKey(taskId, endpoint, suffix);
+    }
+  }
+
+  let lastErr = null;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const url = `${CFG.orchBaseUrl}${endpoint}`;
+      const headers = {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${CFG.workerToken}`,
+      };
+      if (body._idempotencyKey) {
+        headers["Idempotency-Key"] = body._idempotencyKey;
+      }
+      const res = await fetch(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(15000),
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`);
+      }
+      return res.json();
+    } catch (err) {
+      lastErr = err;
+      if (attempt < maxRetries && isTransientError(err)) {
+        const delayMs = CFG.retryBackoffBaseMs * Math.pow(2, attempt);
+        log("warn", "api-retry", {
+          endpoint,
+          taskId,
+          attempt: attempt + 1,
+          maxRetries,
+          delayMs,
+          err: err.message,
+        });
+        await sleep(delayMs);
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastErr;
 }
 
 // ── EVENTS ──────────────────────────────────────────────────────────────────
@@ -1431,10 +1635,6 @@ function resetBackoff() {
   backoff = 0;
 }
 
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
 async function mainLoop() {
   log("info", "worker started", {
     allowedRepos: CFG.allowedRepos,
@@ -1465,6 +1665,12 @@ async function mainLoop() {
 
       task = pullRes.task;
       log("info", "task received", { taskId: task.taskId, mode: task.mode });
+
+      // Stage 5: reset execution nonce for idempotency and start lease
+      resetExecutionNonce();
+      getExecutionNonce(task.taskId);
+      startLeaseRenewal(task.taskId);
+
       await sendEvent(task, "claimed", "pull", "task received");
 
       // ── RESUME CHECK ──
@@ -1519,6 +1725,21 @@ async function mainLoop() {
         result = await executeIsolatedReview(task, stepCtxMain);
       } else {
         result = await executeTask(task, stepCtxMain);
+      }
+
+      // ── LEASE CHECK (Stage 5) ──
+      // If lease expired during execution, abort reporting — another worker may
+      // have reclaimed this task. Log and move on.
+      if (isLeaseExpired()) {
+        log("warn", "lease-expired-abort", {
+          taskId: task.taskId,
+          status: result.status,
+          msg: "lease expired during execution; skipping result report",
+        });
+        await sendEvent(task, "failed", "lease", "lease expired during execution — result discarded");
+        stopLeaseRenewal();
+        resetExecutionNonce();
+        continue;
       }
 
       // ── NEEDS_INPUT CHECK ──
@@ -1695,11 +1916,25 @@ async function mainLoop() {
       }
       await apiPost("/api/worker/result", resultBody);
 
+      // Stage 5: clean up lease + nonce
+      stopLeaseRenewal();
+      resetExecutionNonce();
+
       resetBackoff();
     } catch (err) {
+      // Stage 5: stop lease on error
+      stopLeaseRenewal();
+      resetExecutionNonce();
+
       const delay = nextBackoff();
       log("error", "loop error", { err: err.message, nextRetryMs: delay });
-      if (task) {
+
+      // Stage 5: DLQ for fatal errors (non-transient or exhausted retries)
+      if (task && !isTransientError(err)) {
+        log("error", "fatal-error-dlq", { taskId: task.taskId, err: err.message });
+        await sendToDeadLetter(task, err, 0, "fatal error in main loop");
+        await sendEvent(task, "failed", "dlq", `dead-lettered: ${err.message}`);
+      } else if (task) {
         await sendEvent(task, "failed", "other", err.message);
       }
       await sleep(delay);
