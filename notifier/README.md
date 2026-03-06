@@ -2,6 +2,8 @@
 
 Minimal Telegram notifier for worker task events. Receives event payloads via HTTP and forwards them as formatted messages to a Telegram chat.
 
+Only user-relevant lifecycle events reach Telegram — technical/intermediate events are suppressed server-side.
+
 ## Setup
 
 ```bash
@@ -43,7 +45,7 @@ curl http://localhost:18999/health
 
 Response:
 ```json
-{"ok":true,"service":"tg-notifier","version":"0.1.0"}
+{"ok":true,"service":"tg-notifier","version":"0.2.0"}
 ```
 
 ### POST /notify/event
@@ -67,6 +69,11 @@ Success response:
 {"ok":true}
 ```
 
+Suppressed event (technical/intermediate):
+```json
+{"ok":true,"suppressed":true}
+```
+
 Dedupe response (same event within TTL):
 ```json
 {"ok":true,"dedupe":true}
@@ -77,38 +84,125 @@ Error response (Telegram API failure):
 {"ok":false,"error":"Telegram API error: chat not found"}
 ```
 
+---
+
+## Event filtering
+
+### Events forwarded to Telegram (user-facing)
+
+| Status | Label (Telegram) | Shown content |
+|---|---|---|
+| `claimed` | 📥 Задача получена | workerId |
+| `needs_input` | ❓ Нужен ответ | question + options |
+| `review_pass` | ✅ Review pass | iter N/M, duration |
+| `review_fail` | ⛔ Review не прошёл | severity, findings snippet, finding count |
+| `review_loop_fail` | 🔁 Нужен patch | iter N/M, severity, findings snippet, finding count |
+| `escalated` | ⚠️ Эскалация | reason, unresolved finding count, duration |
+| `completed` | ✅ Выполнено | duration, exitCode |
+| `failed` | ❌ Ошибка | duration, exitCode, error message |
+| `timeout` | ⏰ Таймаут | timeout value |
+| `rejected` | 🚫 Отклонено | validation errors |
+| `resumed` | ↩️ Возобновлено | answeredBy |
+
+### Events suppressed (never sent to Telegram)
+
+| Status | Phase(s) | Reason |
+|---|---|---|
+| `started` | any | Internal kickoff — not useful to end-user |
+| `keepalive` | any | Heartbeat noise |
+| `risk` | any | Near-timeout / exit-failure diagnostic |
+| `progress` | `plan` | Step plan details (internal) |
+| `progress` | `validate` | "validation passed" (noise) |
+| `progress` | `git` | Git checkout detail (internal) |
+| `progress` | `claude` | "spawning claude" (internal) |
+| `progress` | `report` | "reporting result" (internal) |
+| `progress` | `review_loop` | Intermediate loop steps — user sees `review_loop_fail`/`review_pass` instead |
+
+---
+
 ## Telegram message examples
 
-Task claimed:
+**Task claimed:**
 ```
-📥 [claimed/pull] abc-123
-task received
-macbook-sigma
-```
-
-Task completed with meta:
-```
-✅ [completed/report] abc-123
-task completed
-duration: 30.3s | exit: 0
-macbook-sigma
+📥 Задача получена
+abc-123
+Worker: macbook-sigma
 ```
 
-Task failed:
+**Needs input:**
 ```
-❌ [failed/report] abc-123
-task failed
-duration: 12.1s | exit: 1
-macbook-sigma
+❓ Нужен ответ
+abc-123
+Which database should I use?
+  1. PostgreSQL
+  2. SQLite
 ```
 
-Timeout:
+**Review passed (after loop):**
 ```
-⏰ [timeout/claude] abc-123
-claude process timed out
-duration: 180.0s
-macbook-sigma
+✅ Review pass
+abc-123
+iter 2/3
+45.2s
 ```
+
+**Review loop fail (patch queued):**
+```
+🔁 Нужен patch
+abc-123
+Iter 1/3 · severity: major
+SQL injection in auth.js — no prepared statements used
+2 finding(s) — patch будет применён
+```
+
+**Review not passed (single-shot):**
+```
+⛔ Review не прошёл
+abc-123
+Severity: major
+SQL injection in auth.js
+2 finding(s)
+```
+
+**Escalated:**
+```
+⚠️ Эскалация
+abc-123
+max review iterations (3) reached without passing
+1 unresolved finding(s)
+120.0s
+```
+
+**Task completed:**
+```
+✅ Выполнено
+abc-123
+30.3s | exit:0
+```
+
+**Task failed:**
+```
+❌ Ошибка
+abc-123
+12.1s | exit:1
+TypeError: Cannot read properties of undefined
+```
+
+**Timeout:**
+```
+⏰ Таймаут
+abc-123
+after 180s
+```
+
+**Rejected:**
+```
+🚫 Отклонено
+abc-123
+repoPath not in allowlist: /tmp/evil
+```
+
+---
 
 ## Integration with orch-api
 

@@ -2,6 +2,7 @@
 "use strict";
 
 const { spawn } = require("child_process");
+const crypto = require("crypto");
 const path = require("path");
 const fs = require("fs");
 
@@ -33,7 +34,7 @@ const CFG = {
     .split(",")
     .map((p) => path.resolve(p.trim()))
     .filter(Boolean),
-  claudeTimeoutMs: int("CLAUDE_TIMEOUT_MS", 180000),
+  claudeTimeoutMs: normalizeTimeoutMs(process.env.CLAUDE_TIMEOUT_MS),
   claudeBypassPermissions:
     (process.env.CLAUDE_BYPASS_PERMISSIONS || "true").toLowerCase() === "true",
   claudeModel: process.env.CLAUDE_MODEL || "sonnet",
@@ -41,14 +42,18 @@ const CFG = {
     (process.env.NEEDS_INPUT_DEBUG || "false").toLowerCase() === "true",
   heartbeatIntervalMs: int("HEARTBEAT_INTERVAL_MS", 90000),
   reviewMaxIterations: int("REVIEW_MAX_ITERATIONS", 3),
+  orchestratedLoopEnabled:
+    (process.env.ORCHESTRATED_LOOP_ENABLED || "true").toLowerCase() === "true",
 };
 
 const STDOUT_LIMIT = 200 * 1024;
 const STDERR_LIMIT = 200 * 1024;
+const INLINE_OUTPUT_LIMIT = 8 * 1024; // 8KB inline cap for v2 result
 const BRANCH_RE = /^(agent|hotfix|feature|bugfix)\/[a-zA-Z0-9._-]+$/;
 const BLOCKED_BRANCHES = new Set(["main", "master"]);
 const ALLOWED_MODELS = new Set(["sonnet", "opus"]);
-const NEEDS_INPUT_RE = /\[NEEDS_INPUT\]([\s\S]*?)\[\/NEEDS_INPUT\]/;
+// [NEEDS_INPUT] must start at the beginning of a line (not inline in prose).
+const NEEDS_INPUT_ANCHORED_RE = /^[ \t]*\[NEEDS_INPUT\]([\s\S]*?)\[\/NEEDS_INPUT\]/m;
 const REVIEW_PASS_RE = /\[REVIEW_PASS\]/i;
 const REVIEW_FAIL_RE = /\[REVIEW_FAIL(?:\s+severity=([^\]]+))?\]([\s\S]*?)\[\/REVIEW_FAIL\]/i;
 const REVIEW_FINDINGS_JSON_RE = /\[REVIEW_FINDINGS_JSON\]([\s\S]*?)\[\/REVIEW_FINDINGS_JSON\]/i;
@@ -65,6 +70,17 @@ function required(key) {
 function int(key, fallback) {
   const v = process.env[key];
   return v ? parseInt(v, 10) : fallback;
+}
+
+// Node.js setTimeout silently wraps delay values > 2^31-1 (~24.8 days) and fires
+// immediately. normalizeTimeoutMs guards against overflow, invalid strings, and
+// unreasonably small values so every setTimeout(fn, CFG.claudeTimeoutMs) call is safe.
+function normalizeTimeoutMs(raw) {
+  const parsed = parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return 180000; // default: 3 min
+  if (parsed < 1000) return 1000;                             // min: 1 s
+  if (parsed > 2147483647) return 2147483647;                 // Node safe max (2^31-1)
+  return parsed;
 }
 
 // ── LOGGING ────────────────────────────────────────────────────────────────────
@@ -138,6 +154,11 @@ function validateTask(task) {
   const validModes = ["dry_run", "implement", "review", "tests"];
   if (task.mode && !validModes.includes(task.mode)) {
     errors.push(`invalid mode: ${task.mode}`);
+  }
+
+  // orchestratedLoop requires implement or review mode (it contains both internally)
+  if (task.orchestratedLoop && task.mode && !["implement", "review"].includes(task.mode)) {
+    errors.push(`orchestratedLoop requires mode implement or review, got: ${task.mode}`);
   }
 
   if (task.scope) {
@@ -232,6 +253,75 @@ function truncate(str, limit) {
   return { text: text + "\n[TRUNCATED]", truncated: true };
 }
 
+// ── ARTIFACT PERSISTENCE (v2 result contract) ───────────────────────────────
+
+const ARTIFACTS_DIR = path.join(__dirname, "data", "artifacts");
+
+/**
+ * Persist a string blob as an artifact file under data/artifacts/<taskId>/.
+ * Returns artifact metadata object.
+ */
+function saveArtifact(taskId, name, kind, content) {
+  const dir = path.join(ARTIFACTS_DIR, taskId);
+  fs.mkdirSync(dir, { recursive: true });
+
+  const buf = Buffer.from(content, "utf-8");
+  const sha256 = crypto.createHash("sha256").update(buf).digest("hex");
+  const filePath = path.join(dir, name);
+  fs.writeFileSync(filePath, buf);
+
+  const preview = content.slice(0, 512);
+
+  return {
+    name,
+    kind,
+    path: `data/artifacts/${taskId}/${name}`,
+    bytes: buf.length,
+    sha256,
+    preview,
+  };
+}
+
+/**
+ * Build v2 result output: persist large stdout/stderr as artifact files,
+ * truncate inline output to INLINE_OUTPUT_LIMIT (8KB).
+ * Returns { output, artifacts } where output has inline-capped text and
+ * artifacts is the metadata array.
+ */
+function buildV2Output(taskId, output) {
+  const artifacts = [];
+  let inlineStdout = output.stdout;
+  let inlineStderr = output.stderr;
+  let truncated = output.truncated;
+
+  // Persist stdout as artifact if it exceeds inline cap
+  if (Buffer.byteLength(output.stdout, "utf-8") > INLINE_OUTPUT_LIMIT) {
+    const art = saveArtifact(taskId, "stdout.txt", "stdout", output.stdout);
+    artifacts.push(art);
+    const trunc = truncate(output.stdout, INLINE_OUTPUT_LIMIT);
+    inlineStdout = trunc.text + `\n[full output: ${art.path}]`;
+    truncated = true;
+  }
+
+  // Persist stderr as artifact if it exceeds inline cap
+  if (Buffer.byteLength(output.stderr, "utf-8") > INLINE_OUTPUT_LIMIT) {
+    const art = saveArtifact(taskId, "stderr.txt", "stderr", output.stderr);
+    artifacts.push(art);
+    const trunc = truncate(output.stderr, INLINE_OUTPUT_LIMIT);
+    inlineStderr = trunc.text + `\n[full output: ${art.path}]`;
+    truncated = true;
+  }
+
+  return {
+    output: {
+      stdout: inlineStdout,
+      stderr: inlineStderr,
+      truncated,
+    },
+    artifacts,
+  };
+}
+
 // ── NEEDS_INPUT PARSER ────────────────────────────────────────────────────────
 
 function extractClaudeResult(stdout) {
@@ -274,87 +364,64 @@ function normalizeOptions(raw) {
 
 function normalizePayload(obj, sourceType) {
   const q = typeof obj.question === "string" ? obj.question.trim() : "";
+  // isStructuredAsk requires BOTH a recognised source AND a non-empty question.
+  // Without a real question the payload is informational, not an ask.
+  const hasQuestion = q.length > 0;
   return {
-    question: q || "Clarification required",
+    question: hasQuestion ? q : null,
     options: normalizeOptions(obj.options),
     context: typeof obj.context === "string"
       ? (obj.context.trim().slice(0, 1000) || null)
       : null,
     sourceType,
+    isStructuredAsk: hasQuestion && (sourceType === "strict" || sourceType === "ask_user_question"),
   };
 }
 
-function tryParseJsonAt(text, start) {
-  let depth = 0;
-  for (let j = start; j < text.length; j++) {
-    if (text[j] === "{") depth++;
-    else if (text[j] === "}") {
-      depth--;
-      if (depth === 0) {
-        try { return JSON.parse(text.slice(start, j + 1)); }
-        catch { return null; }
-      }
-    }
-  }
-  return null;
+// Remove triple-backtick fenced blocks so that [NEEDS_INPUT] examples inside
+// code fences are not mistakenly treated as real ask blocks.
+function stripCodeFences(text) {
+  return text.replace(/```[\s\S]*?```/g, "");
 }
 
+// Detect structured needs_input asks. Only two sources are accepted:
+//   A. [NEEDS_INPUT]...[/NEEDS_INPUT] block — line-anchored, outside code fences,
+//      with a non-empty question: field.
+//   B. AskUserQuestion tool in permission_denials JSONL.
+// Heuristic detection (fenced JSON, plain JSON scan, token proximity) has been
+// removed — it caused false positives on implement/review tasks whose output
+// mentioned NEEDS_INPUT or contained JSON with "question" keys in prose/reports.
 function parseNeedsInput(stdout) {
   const text = extractClaudeResult(stdout) || stdout;
 
   // A. Strict marker: [NEEDS_INPUT]...[/NEEDS_INPUT]
-  const strictMatch = text.match(NEEDS_INPUT_RE);
+  // Requirements to count as a real ask block:
+  //   1. [NEEDS_INPUT] must appear at the start of a line (not inline in prose).
+  //   2. The marker must not be inside a triple-backtick code fence.
+  //   3. The block must contain a non-empty `question:` field.
+  const textNoFences = stripCodeFences(text);
+  const strictMatch = textNoFences.match(NEEDS_INPUT_ANCHORED_RE);
   if (strictMatch) {
-    niDebug("step A matched: strict marker");
     const block = strictMatch[1];
     const question = (block.match(/^\s*question:\s*(.+)$/m) || [])[1]?.trim() || null;
-    const optionsRaw = (block.match(/^\s*options:\s*(.+)$/m) || [])[1]?.trim() || null;
-    const context = (block.match(/^\s*context:\s*(.+)$/m) || [])[1]?.trim() || null;
-    return normalizePayload({ question, options: optionsRaw, context }, "strict");
-  }
-
-  // B. Fenced JSON block (```json ... ``` or ``` ... ```) with question key
-  const fencedRe = /```(?:json)?\s*\n([\s\S]*?)```/g;
-  let fm;
-  while ((fm = fencedRe.exec(text)) !== null) {
-    try {
-      const obj = JSON.parse(fm[1]);
-      if (obj && obj.question) {
-        niDebug("step B matched: fenced json");
-        return normalizePayload(obj, "fenced");
-      }
-    } catch { /* next fence */ }
-  }
-
-  // C. Plain JSON object in result text with question key
-  const scanLimit = Math.min(text.length, 50000);
-  for (let i = 0; i < scanLimit; i++) {
-    if (text[i] !== "{") continue;
-    const ahead = text.slice(i, i + 3000);
-    if (!ahead.includes('"question"')) continue;
-    const obj = tryParseJsonAt(text, i);
-    if (obj && typeof obj.question === "string") {
-      niDebug("step C matched: plain json");
-      return normalizePayload(obj, "json");
+    if (!question) {
+      niDebug("step A: [NEEDS_INPUT] block found but no question field — ignoring (not an ask block)");
+    } else {
+      niDebug("step A matched: strict marker with non-empty question");
+      const optionsRaw = (block.match(/^\s*options:\s*(.+)$/m) || [])[1]?.trim() || null;
+      const context = (block.match(/^\s*context:\s*(.+)$/m) || [])[1]?.trim() || null;
+      return normalizePayload({ question, options: optionsRaw, context }, "strict");
     }
   }
 
-  // D. Heuristic: NEEDS_INPUT token + question nearby
-  if (/NEEDS_INPUT/i.test(text) && /question/i.test(text)) {
-    niDebug("step D matched: heuristic");
-    const qMatch = text.match(/question[:\s]+["']?([^"'\n]{5,})/i);
-    const question = qMatch ? qMatch[1].trim().slice(0, 500) : null;
-    return normalizePayload({ question, options: null, context: null }, "heuristic");
-  }
-
-  // E. AskUserQuestion tool in permission_denials (raw stdout, not result text)
+  // B. AskUserQuestion tool in permission_denials (raw stdout, not result text)
   const auq = extractAskUserQuestion(stdout);
   if (auq) {
-    niDebug("step E matched: ask_user_question");
+    niDebug("step B matched: ask_user_question");
     return auq;
   }
 
-  niDebug("needs_input not detected in any step");
+  niDebug("needs_input not detected (strict-only detection)");
   return null;
 }
 
@@ -665,6 +732,202 @@ async function runReviewLoop(task, stepCtx) {
   };
 }
 
+// ── ORCHESTRATED LOOP ─────────────────────────────────────────────────────────
+
+// Emits a context_reset telemetry event to mark the start of a new Claude session.
+async function emitContextReset(task, phase, iteration, maxIter) {
+  await sendEvent(task, "context_reset", "orchestrate",
+    `context reset — starting ${phase} (iter ${iteration}/${maxIter})`,
+    { phase, iteration, maxIter, contextReset: true }
+  );
+}
+
+// Full orchestrated loop: implement (fresh) → review (fresh) →
+//   (if fail) patch (fresh) → re-review (fresh) → … until pass or max iterations → escalated.
+// Each Claude invocation is a fully independent subprocess with no session carryover.
+async function runOrchestratedLoop(task, stepCtx) {
+  const maxIter = Math.max(1, Math.min(task.maxReviewIterations || CFG.reviewMaxIterations, 10));
+  const loopStart = Date.now();
+
+  log("info", "orchestrated_loop started", { taskId: task.taskId, maxIter });
+
+  // ── Phase 1: IMPLEMENT (fresh context, new Claude session) ──
+  await emitContextReset(task, "implement", 0, maxIter);
+  await sendEvent(task, "progress", "orchestrate",
+    "phase:implement — spawning fresh Claude session",
+    { phase: "implement", stepIndex: 1, stepTotal: stepCtx.stepTotal || 4 }
+  );
+
+  const implTask = {
+    ...task,
+    mode: "implement",
+    reviewLoop: false,
+    orchestratedLoop: false,
+  };
+  const implResult = await executeTask(implTask, stepCtx);
+
+  log("info", "orchestrated_loop: implement done", {
+    taskId: task.taskId,
+    status: implResult.status,
+  });
+
+  if (implResult.status !== "completed") {
+    log("warn", "orchestrated_loop: implement did not complete", {
+      taskId: task.taskId,
+      status: implResult.status,
+    });
+    return {
+      status: "escalated",
+      output: implResult.output,
+      meta: {
+        ...implResult.meta,
+        orchestratePhase: "implement",
+        reviewIteration: 0,
+        reviewMaxIterations: maxIter,
+        escalationReason: `implement phase ${implResult.status}`,
+        reviewLoopDurationMs: Date.now() - loopStart,
+      },
+    };
+  }
+
+  let currentFindings = null;
+  let currentSF = null;
+
+  for (let iter = 1; iter <= maxIter; iter++) {
+
+    // ── Patch phase (iterations 2+: patch before re-review) ──
+    if (currentFindings !== null) {
+      const patchTask = buildPatchTask(task, currentFindings, iter);
+      await emitContextReset(task, "patch", iter, maxIter);
+      await sendEvent(task, "progress", "orchestrate",
+        `phase:patch (iter ${iter}/${maxIter}) — spawning fresh Claude session`,
+        { phase: "patch", iteration: iter, maxIter, contextReset: true }
+      );
+      log("info", "orchestrated_loop: patch run", { taskId: task.taskId, iter });
+      const patchResult = await executeTask(patchTask, stepCtx);
+
+      if (patchResult.status !== "completed") {
+        log("warn", "orchestrated_loop: patch did not complete", {
+          taskId: task.taskId,
+          iter,
+          status: patchResult.status,
+        });
+        return {
+          status: "escalated",
+          output: patchResult.output,
+          meta: {
+            ...patchResult.meta,
+            orchestratePhase: "patch",
+            reviewIteration: iter,
+            reviewMaxIterations: maxIter,
+            reviewFindings: currentFindings,
+            structuredFindings: currentSF,
+            escalationReason: `patch phase ${patchResult.status} at iteration ${iter}`,
+            reviewLoopDurationMs: Date.now() - loopStart,
+          },
+        };
+      }
+    }
+
+    // ── Review phase (fresh context, with diff on re-reviews) ──
+    // Always override mode to "review" — the parent task may be mode:"implement".
+    const reviewTaskBase = iter > 1
+      ? await buildReviewTaskWithDiff(task, iter)
+      : task;
+    const reviewTask = {
+      ...reviewTaskBase,
+      mode: "review",
+      reviewLoop: false,
+      orchestratedLoop: false,
+    };
+
+    await emitContextReset(task, "review", iter, maxIter);
+    await sendEvent(task, "progress", "orchestrate",
+      `phase:review (iter ${iter}/${maxIter}) — spawning fresh Claude session`,
+      { phase: "review", iteration: iter, maxIter, contextReset: true }
+    );
+    log("info", "orchestrated_loop: review run", { taskId: task.taskId, iter });
+    const reviewResult = await executeTask(reviewTask, stepCtx);
+
+    const rv = parseReviewVerdict(reviewResult.output.stdout);
+    const sf = parseStructuredFindings(reviewResult.output.stdout);
+
+    if (rv.verdict === "pass") {
+      log("info", "orchestrated_loop: passed", { taskId: task.taskId, iter });
+      return {
+        status: "review_pass",
+        output: reviewResult.output,
+        meta: {
+          ...reviewResult.meta,
+          reviewVerdict: "pass",
+          reviewIteration: iter,
+          reviewMaxIterations: maxIter,
+          orchestratePhase: "review",
+          reviewLoopDurationMs: Date.now() - loopStart,
+        },
+      };
+    }
+
+    currentFindings = serializeFindings(rv, sf);
+    currentSF = sf;
+
+    if (iter >= maxIter) {
+      log("warn", "orchestrated_loop: max iterations reached", {
+        taskId: task.taskId,
+        iter,
+        maxIter,
+      });
+      return {
+        status: "escalated",
+        output: reviewResult.output,
+        meta: {
+          ...reviewResult.meta,
+          reviewVerdict: "fail",
+          reviewSeverity: rv.severity,
+          reviewFindings: rv.findings,
+          structuredFindings: sf,
+          reviewIteration: iter,
+          reviewMaxIterations: maxIter,
+          orchestratePhase: "review",
+          escalationReason: `max review iterations (${maxIter}) reached without passing`,
+          reviewLoopDurationMs: Date.now() - loopStart,
+        },
+      };
+    }
+
+    // Emit intermediate fail event — loop will continue with a patch
+    await sendEvent(task, "review_loop_fail", "report",
+      `review failed (iter ${iter}/${maxIter}), severity=${rv.severity}`,
+      {
+        reviewVerdict: "fail",
+        reviewSeverity: rv.severity,
+        reviewFindings: (rv.findings || "").slice(0, 500),
+        structuredFindings: sf,
+        iteration: iter,
+        maxIter,
+      }
+    );
+    log("info", "orchestrated_loop: iteration failed, will patch", {
+      taskId: task.taskId,
+      iter,
+      severity: rv.severity,
+    });
+  }
+
+  // Safety fallback (should not be reached)
+  return {
+    status: "escalated",
+    output: { stdout: "", stderr: "", truncated: false },
+    meta: {
+      reviewIteration: maxIter,
+      reviewMaxIterations: maxIter,
+      orchestratePhase: "unknown",
+      escalationReason: "orchestrated loop exited unexpectedly",
+      reviewLoopDurationMs: Date.now() - loopStart,
+    },
+  };
+}
+
 // ── PLAN BUILDER ──────────────────────────────────────────────────────────────
 
 function buildPlan(task) {
@@ -673,6 +936,15 @@ function buildPlan(task) {
     return ["validate", "report"];
   }
   const branch = task.scope?.branch || "branch";
+  if (task.orchestratedLoop) {
+    const maxIter = task.maxReviewIterations || CFG.reviewMaxIterations;
+    return [
+      "validate",
+      `checkout ${branch}`,
+      `orchestrated_loop: implement→review[→patch→review]* (max ${maxIter} iters, model: ${model})`,
+      "report",
+    ];
+  }
   if (task.reviewLoop && task.mode === "review") {
     const maxIter = task.maxReviewIterations || CFG.reviewMaxIterations;
     return [
@@ -1017,11 +1289,15 @@ async function mainLoop() {
       });
 
       // ── EXECUTE ──
-      const result = (task.reviewLoop && task.mode === "review")
-        ? await runReviewLoop(task, { gitStep, claudeStep, stepTotal })
-        : await executeTask(task, { gitStep, claudeStep, stepTotal });
+      const result = task.orchestratedLoop
+        ? await runOrchestratedLoop(task, { gitStep, claudeStep, stepTotal })
+        : (task.reviewLoop && task.mode === "review")
+          ? await runReviewLoop(task, { gitStep, claudeStep, stepTotal })
+          : await executeTask(task, { gitStep, claudeStep, stepTotal });
 
       // ── NEEDS_INPUT CHECK ──
+      // Only structured asks (explicit [NEEDS_INPUT] marker with question field,
+      // or AskUserQuestion tool) can trigger needs_input. Heuristics removed.
       let ni = null;
       if (result.status === "completed") {
         ni = parseNeedsInput(result.output.stdout);
@@ -1037,11 +1313,12 @@ async function mainLoop() {
             hasAskUserQuestion: _hasAuq,
             parseNeedsInputFound: ni !== null,
             sourceType: ni?.sourceType || null,
+            isStructuredAsk: ni?.isStructuredAsk || false,
             questionPreview: ni ? (ni.question || "").slice(0, 80) : null,
           });
         }
 
-        if (ni) {
+        if (ni && ni.isStructuredAsk && ni.question) {
           result.status = "needs_input";
           result.meta.question = ni.question;
           result.meta.options = ni.options;
@@ -1050,25 +1327,24 @@ async function mainLoop() {
           log("info", "needs_input detected", {
             taskId: task.taskId,
             sourceType: ni.sourceType,
+            isStructuredAsk: ni.isStructuredAsk,
             hasOptions: !!(ni.options && ni.options.length),
             questionPreview: (ni.question || "").slice(0, 100),
           });
+        } else if (ni) {
+          log("info", "needs_input candidate rejected: not a structured ask", {
+            taskId: task.taskId,
+            sourceType: ni.sourceType,
+            isStructuredAsk: false,
+          });
+          ni = null; // clear so downstream gates don't fire
         }
-      }
-
-      // Safety assert: if ni was found but status is still completed, force it
-      if (ni && result.status === "completed") {
-        log("error", "gating violation: needs_input detected but completed path chosen", {
-          taskId: task.taskId,
-          sourceType: ni.sourceType,
-        });
-        result.status = "needs_input";
       }
 
       // ── REVIEW GATE ──
       // For review mode, completed is never valid — must be review_pass or review_fail.
-      // reviewLoop tasks have already been handled by runReviewLoop above.
-      if (task.mode === "review" && !task.reviewLoop && result.status === "completed") {
+      // reviewLoop and orchestratedLoop tasks have already been handled above.
+      if (task.mode === "review" && !task.reviewLoop && !task.orchestratedLoop && result.status === "completed") {
         const rv = parseReviewVerdict(result.output.stdout);
         result.meta.reviewVerdict = rv.verdict;
         if (rv.verdict === "pass") {
@@ -1088,7 +1364,7 @@ async function mainLoop() {
 
       // Hard safety gate: if review mode (non-loop) still shows completed (should never happen),
       // force review_fail. Completion is impossible without an explicit REVIEW_PASS marker.
-      if (task.mode === "review" && !task.reviewLoop && result.status === "completed") {
+      if (task.mode === "review" && !task.reviewLoop && !task.orchestratedLoop && result.status === "completed") {
         log("error", "review-gate violation: completed status blocked for review mode", {
           taskId: task.taskId,
         });
@@ -1104,12 +1380,24 @@ async function mainLoop() {
         durationMs: result.meta.durationMs,
       });
 
-      if (result.status === "needs_input") {
+      if (result.status === "needs_input" && ni && ni.isStructuredAsk && ni.question) {
         await sendEvent(
           task, "needs_input", "claude",
           `needs input: ${result.meta.question || "(no question)"}`,
           result.meta
         );
+      } else if (result.status === "needs_input") {
+        // Defense-in-depth: status was set to needs_input but structured ask
+        // validation failed at the event gate. Demote to completed to prevent
+        // false notifications reaching Telegram/orchestrator.
+        log("error", "needs_input event gate blocked: status was needs_input but ni guard failed", {
+          taskId: task.taskId,
+          niPresent: !!ni,
+          isStructuredAsk: ni?.isStructuredAsk || false,
+          question: ni?.question || null,
+        });
+        result.status = "completed";
+        await sendEvent(task, "completed", "report", "task completed", result.meta);
       } else if (result.status === "review_pass") {
         const iterInfo = result.meta.reviewIteration
           ? ` (iter ${result.meta.reviewIteration}/${result.meta.reviewMaxIterations})`
@@ -1140,18 +1428,22 @@ async function mainLoop() {
         stepIndex: stepTotal,
         stepTotal,
       });
+      // Build v2 result: persist artifacts + truncate inline output
+      const v2 = buildV2Output(task.taskId, result.output);
       const resultBody = {
+        resultVersion: 2,
         workerId: CFG.workerId,
         taskId: task.taskId,
         status: result.status,
         mode: task.mode,
-        output: result.output,
+        output: v2.output,
+        artifacts: v2.artifacts,
         meta: result.meta,
       };
       // For needs_input: hoist question/options/context to top-level so the
       // orchestrator can store them directly on task.question / task.options
       // without having to dig into meta. meta fields are preserved for compat.
-      if (result.status === "needs_input") {
+      if (result.status === "needs_input" && ni && ni.isStructuredAsk) {
         resultBody.question = result.meta.question ?? null;
         resultBody.options = result.meta.options ?? null;
         resultBody.context = result.meta.context ?? null;
