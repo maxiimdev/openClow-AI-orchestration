@@ -14,7 +14,6 @@
 const http = require("http");
 const { spawn } = require("child_process");
 
-const PORT = 9878;
 let pullCount = 0;
 let worker = null;
 let receivedResults = [];
@@ -312,7 +311,8 @@ function finish() {
   process.exit(allPass ? 0 : 1);
 }
 
-server.listen(PORT, () => {
+server.listen(0, () => {
+  const PORT = server.address().port;
   console.log(color(36, `[orch] mock orchestrator on http://localhost:${PORT}`));
   console.log(color(36, `[orch] mock claude: ${mockClaudePath}`));
   console.log(color(36, `[orch] mock repo:   ${mockRepoDir}`));

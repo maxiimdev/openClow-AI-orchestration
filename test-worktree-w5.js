@@ -24,8 +24,6 @@ const path = require("path");
 const os = require("os");
 const { spawn, execSync } = require("child_process");
 
-const PORT = 9883;
-
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
 let passed = 0;
@@ -598,6 +596,9 @@ function runIntegrationTests() {
 
     const events = [];
     let taskCount = 0;
+    let resultCount = 0;
+    let resolveAllResults;
+    const allResultsDone = new Promise((r) => (resolveAllResults = r));
     const MAX_TASKS = 2;
 
     const server = http.createServer((req, res) => {
@@ -629,6 +630,8 @@ function runIntegrationTests() {
           events.push(payload);
           res.end(JSON.stringify({ ok: true }));
         } else if (url === "/api/worker/result") {
+          resultCount++;
+          if (resultCount >= MAX_TASKS) resolveAllResults();
           res.end(JSON.stringify({ ok: true }));
         } else if (url === "/api/worker/lease-renew") {
           res.end(JSON.stringify({ ok: true, expired: false }));
@@ -639,7 +642,8 @@ function runIntegrationTests() {
       });
     });
 
-    server.listen(PORT, () => {
+    server.listen(0, () => {
+      const PORT = server.address().port;
       console.log(`Mock orchestrator on port ${PORT}`);
 
       const env = {
@@ -667,8 +671,14 @@ function runIntegrationTests() {
       worker.stdout.on("data", (c) => (stdout += c));
       worker.stderr.on("data", (c) => (stderr += c));
 
-      // Wait for tasks to complete then verify
-      setTimeout(() => {
+      // Wait for all results, then verify
+      const safetyTimer = setTimeout(() => {
+        console.error("[WARN] integration test timed out after 30s");
+        resolveAllResults();
+      }, 30000);
+
+      allResultsDone.then(() => {
+        clearTimeout(safetyTimer);
         worker.kill("SIGTERM");
 
         setTimeout(() => {
@@ -718,8 +728,8 @@ function runIntegrationTests() {
 
           console.log(`\n=== Summary: ${passed} passed, ${failed} failed ===\n`);
           resolve();
-        }, 1500);
-      }, 12000);
+        }, 500);
+      });
     });
   });
 }

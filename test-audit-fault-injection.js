@@ -22,7 +22,7 @@ const path = require("path");
 const os = require("os");
 const { spawn, execSync } = require("child_process");
 
-const PORT = 9884;
+let PORT;
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -204,8 +204,9 @@ function spawnWorker(extraEnv = {}) {
 // ── Tests ───────────────────────────────────────────────────────────────────────
 
 async function runTests() {
-  server.listen(PORT);
+  server.listen(0);
   await new Promise((r) => server.on("listening", r));
+  PORT = server.address().port;
   console.log(`Mock orchestrator on port ${PORT}\n`);
 
   // ══════════════════════════════════════════════════════════════════════════════

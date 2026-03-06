@@ -24,8 +24,6 @@ const path = require("path");
 const os = require("os");
 const { spawn, execSync } = require("child_process");
 
-const PORT = 9881;
-
 // ── Mock repo + mock claude ────────────────────────────────────────────────────
 
 const mockClaudeDir = fs.mkdtempSync(path.join(os.tmpdir(), "mock-claude-w3-"));
@@ -167,7 +165,8 @@ const server = http.createServer((req, res) => {
 
 // ── Run ────────────────────────────────────────────────────────────────────────
 
-server.listen(PORT, () => {
+server.listen(0, () => {
+  const PORT = server.address().port;
   console.log(`Mock orchestrator on :${PORT}`);
 
   const worker = spawn("node", ["worker.js"], {

@@ -9,7 +9,6 @@
 const http = require("http");
 const { spawn } = require("child_process");
 
-const PORT = 9877;
 let pullCount = 0;
 let worker = null;
 
@@ -73,7 +72,8 @@ const server = http.createServer((req, res) => {
   });
 });
 
-server.listen(PORT, () => {
+server.listen(0, () => {
+  const PORT = server.address().port;
   console.log(`[mock] orchestrator listening on http://localhost:${PORT}`);
   console.log("[mock] spawning worker...\n");
 

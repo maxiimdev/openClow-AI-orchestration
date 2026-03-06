@@ -20,7 +20,7 @@ const path = require("path");
 const os = require("os");
 const { spawn, execSync } = require("child_process");
 
-const PORT = 9879;
+let PORT;
 
 // ── Mock repo + mock claude ────────────────────────────────────────────────────
 
@@ -290,13 +290,12 @@ async function runAllTests() {
     pullQueue.push(makeTask("lease-expire-1", { instructions: "SLOW-TASK" }));
     const w = spawnWorker({ LEASE_RENEW_INTERVAL_MS: "100" });
     try {
-      // Wait for lease expiry event
+      // Wait for the terminal "failed/lease" event (worker aborts result post on lease expiry)
       await waitForEvents(
-        (e) => e.taskId === "lease-expire-1" && e.phase === "lease",
+        (e) => e.taskId === "lease-expire-1" && e.status === "failed" && e.phase === "lease",
         10000
       );
       // Should NOT have a result posted (lease expired → skipped)
-      await new Promise((r) => setTimeout(r, 1000));
       const taskResults = results.filter((r) => r.taskId === "lease-expire-1");
       assert(taskResults.length === 0, `expected 0 results after lease expiry, got ${taskResults.length}`);
     } finally {
@@ -431,7 +430,8 @@ async function runAllTests() {
 
 // ── Main ────────────────────────────────────────────────────────────────────────
 
-server.listen(PORT, "127.0.0.1", async () => {
+server.listen(0, "127.0.0.1", async () => {
+  PORT = server.address().port;
   console.log(`Mock orchestrator listening on port ${PORT}`);
   try {
     await runAllTests();

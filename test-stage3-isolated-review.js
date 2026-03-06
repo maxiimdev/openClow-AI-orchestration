@@ -27,8 +27,6 @@ const path = require("path");
 const os = require("os");
 const { spawn, execSync } = require("child_process");
 
-const PORT = 9879;
-
 // ── Mock repo + mock claude ───────────────────────────────────────────────────
 
 const mockClaudeDir = fs.mkdtempSync(path.join(os.tmpdir(), "mock-claude-s3-"));
@@ -368,7 +366,8 @@ process.on("SIGTERM", () => { cleanup(); process.exit(1); });
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 
-server.listen(PORT, () => {
+server.listen(0, () => {
+  const PORT = server.address().port;
   console.log(color(36, `[orch] listening on :${PORT}`));
 
   worker = spawn("node", [path.join(__dirname, "worker.js")], {

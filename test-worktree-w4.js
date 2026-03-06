@@ -21,7 +21,7 @@ const path = require("path");
 const os = require("os");
 const { spawn, execSync } = require("child_process");
 
-const PORT = 9882;
+// PORT assigned dynamically via server.listen(0)
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -339,7 +339,8 @@ function runIntegrationTests() {
     });
   });
 
-  server.listen(PORT, () => {
+  server.listen(0, () => {
+    const PORT = server.address().port;
     console.log(`Mock orchestrator on :${PORT}`);
 
     const worker = spawn("node", ["worker.js"], {
@@ -445,7 +446,7 @@ function runHardStopTest(callback) {
   // Write 2KB data (we'll set threshold to 1KB)
   fs.writeFileSync(path.join(existingWt, "big.bin"), Buffer.alloc(2048, 0x42));
 
-  const HS_PORT = PORT + 1; // 9883
+  // HS_PORT assigned dynamically below
   let pullCount = 0;
   const results = [];
   let resolveFinish;
@@ -495,7 +496,8 @@ function runHardStopTest(callback) {
     });
   });
 
-  server.listen(HS_PORT, () => {
+  server.listen(0, () => {
+    const HS_PORT = server.address().port;
     console.log(`Mock orchestrator (hard-stop) on :${HS_PORT}`);
 
     const worker = spawn("node", ["worker.js"], {

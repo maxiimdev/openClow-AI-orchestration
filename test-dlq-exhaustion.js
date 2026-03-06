@@ -21,7 +21,7 @@ const path = require("path");
 const os = require("os");
 const { spawn, execSync } = require("child_process");
 
-const PORT = 9879;
+// PORT assigned dynamically via server.listen(0)
 const MAX_RETRIES = 2; // task-level transient failure threshold
 
 // ── Mock repo + mock claude ────────────────────────────────────────────────────
@@ -305,7 +305,8 @@ function finish() {
 
 // ── Start ────────────────────────────────────────────────────────────────────────
 
-server.listen(PORT, () => {
+server.listen(0, () => {
+  const PORT = server.address().port;
   console.log(color(36, `[orch] mock orchestrator on http://localhost:${PORT}`));
   console.log(color(36, `[orch] mock claude: ${mockClaudePath}`));
   console.log(color(36, `[orch] mock repo:   ${mockRepoDir}`));

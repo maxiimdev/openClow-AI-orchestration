@@ -36,7 +36,6 @@ const path = require("path");
 const os = require("os");
 const { spawn, execSync } = require("child_process");
 
-const PORT = 9879;
 const PROOF_REPORT_PATH = path.join(__dirname, "test", "e2e-proof-report.json");
 
 // ── Colour helpers ─────────────────────────────────────────────────────────────
@@ -449,7 +448,8 @@ function finish() {
 
 // ── Start ──────────────────────────────────────────────────────────────────────
 
-server.listen(PORT, () => {
+server.listen(0, () => {
+  const PORT = server.address().port;
   console.log(c(36, `[orch] E2E mock orchestrator on http://localhost:${PORT}`));
   console.log(c(36, `[orch] mock claude: ${mockClaudePath}`));
   console.log(c(36, `[orch] mock repo:   ${mockRepoDir}`));
