@@ -34,7 +34,7 @@ const CFG = {
     .split(",")
     .map((p) => path.resolve(p.trim()))
     .filter(Boolean),
-  claudeTimeoutMs: int("CLAUDE_TIMEOUT_MS", 180000),
+  claudeTimeoutMs: normalizeTimeoutMs(process.env.CLAUDE_TIMEOUT_MS),
   claudeBypassPermissions:
     (process.env.CLAUDE_BYPASS_PERMISSIONS || "true").toLowerCase() === "true",
   claudeModel: process.env.CLAUDE_MODEL || "sonnet",
@@ -70,6 +70,17 @@ function required(key) {
 function int(key, fallback) {
   const v = process.env[key];
   return v ? parseInt(v, 10) : fallback;
+}
+
+// Node.js setTimeout silently wraps delay values > 2^31-1 (~24.8 days) and fires
+// immediately. normalizeTimeoutMs guards against overflow, invalid strings, and
+// unreasonably small values so every setTimeout(fn, CFG.claudeTimeoutMs) call is safe.
+function normalizeTimeoutMs(raw) {
+  const parsed = parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return 180000; // default: 3 min
+  if (parsed < 1000) return 1000;                             // min: 1 s
+  if (parsed > 2147483647) return 2147483647;                 // Node safe max (2^31-1)
+  return parsed;
 }
 
 // ── LOGGING ────────────────────────────────────────────────────────────────────
