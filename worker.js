@@ -208,18 +208,22 @@ function generateIdempotencyKey(taskId, endpoint, suffix) {
 
 // Per-task execution nonce — unique per pull+execute cycle.
 // Used to dedup /result and /event calls for the same task execution.
-// W2: nonces are per-slot to support concurrent tasks.
-let _currentExecutionNonce = null;
+// W2: nonces are per-task (Map) to support concurrent parallel slots safely.
+const _executionNonces = new Map(); // taskId → nonce
 
 function getExecutionNonce(taskId) {
-  if (!_currentExecutionNonce || _currentExecutionNonce.taskId !== taskId) {
-    _currentExecutionNonce = { taskId, nonce: crypto.randomUUID() };
+  if (!_executionNonces.has(taskId)) {
+    _executionNonces.set(taskId, crypto.randomUUID());
   }
-  return _currentExecutionNonce.nonce;
+  return _executionNonces.get(taskId);
 }
 
-function resetExecutionNonce() {
-  _currentExecutionNonce = null;
+function resetExecutionNonce(taskId) {
+  if (taskId) {
+    _executionNonces.delete(taskId);
+  } else {
+    _executionNonces.clear();
+  }
 }
 
 // ── STAGE W2: PER-SLOT CONTEXT ──────────────────────────────────────────────────
@@ -1848,11 +1852,12 @@ function evaluateMergeGate(task, result) {
   result.meta.gate_blocked_reason = reason;
   result.meta.mergeGateFailures = gateFailures;
 
-  // Determine transition: needs_patch if review failed, escalated if tests failed
+  // Determine transition: needs_patch if review failed, escalated if only tests failed
   if (gateFailures.includes("review_not_passed")) {
     result.status = "needs_patch";
   } else {
-    result.status = "needs_patch";
+    result.status = "escalated";
+    result.meta.escalationReason = `merge gate: ${reason}`;
   }
 
   return result;
@@ -2728,6 +2733,7 @@ async function processTask(task, slotCtx) {
       await sendEvent(task, "failed", "lease", "lease expired during execution — result discarded");
       slotStopLease(slotCtx);
       slotResetNonce(slotCtx);
+      resetExecutionNonce(task.taskId);
       return;
     }
 
@@ -2931,6 +2937,7 @@ async function processTask(task, slotCtx) {
     // Clean up slot lease + nonce
     slotStopLease(slotCtx);
     slotResetNonce(slotCtx);
+    resetExecutionNonce(task.taskId);
 
     resetBackoff();
   } catch (err) {
@@ -2947,6 +2954,7 @@ async function processTask(task, slotCtx) {
 
     slotStopLease(slotCtx);
     slotResetNonce(slotCtx);
+    if (task?.taskId) resetExecutionNonce(task.taskId);
 
     const delay = nextBackoff();
     log("error", "slot error", { err: err.message, slotId: slotCtx.slotId, taskId: task?.taskId, nextRetryMs: delay });

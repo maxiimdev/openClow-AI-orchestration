@@ -250,12 +250,12 @@ function runAssertions() {
   const gateEvents1 = events.filter((e) => e.taskId === "w3-review-blocked" && e.phase === "merge_gate");
   assert(gateEvents1.length > 0, "Task 1 has merge_gate event");
 
-  // ── Task 2: tests gate blocks merge-ready/completed → needs_patch ──
+  // ── Task 2: tests gate blocks merge-ready/completed → escalated (tests-only failure) ──
   const r2 = results.find((r) => r.taskId === "w3-tests-blocked");
   assert(r2, "Task 2 (tests-blocked) result received");
   assert(
-    r2 && r2.status === "needs_patch",
-    `Task 2 status=needs_patch when tests not passed (got ${r2?.status})`
+    r2 && r2.status === "escalated",
+    `Task 2 status=escalated when tests not passed (got ${r2?.status})`
   );
   assert(
     r2 && r2.meta && r2.meta.mergeGateBlocked === true,
