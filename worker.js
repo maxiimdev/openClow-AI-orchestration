@@ -55,6 +55,12 @@ const CFG = {
     (process.env.IDEMPOTENCY_ENABLED || "true").toLowerCase() === "true",
   // Stage W2: parallel worktree slots
   maxParallelWorktrees: Math.max(1, int("MAX_PARALLEL_WORKTREES", 2)),
+  // Stage W4: worktree operational reliability
+  worktreeTtlMs: int("WORKTREE_TTL_MS", 3600000),                    // 1 hour default
+  worktreeCleanupIntervalMs: int("WORKTREE_CLEANUP_INTERVAL_MS", 300000), // 5 min scan
+  worktreeDiskThresholdBytes: int("WORKTREE_DISK_THRESHOLD_BYTES", 5 * 1024 * 1024 * 1024), // 5GB
+  worktreeDiskHardStop: (process.env.WORKTREE_DISK_HARD_STOP || "false").toLowerCase() === "true",
+  worktreeRecoveryEnabled: (process.env.WORKTREE_RECOVERY_ENABLED || "true").toLowerCase() === "true",
 };
 
 const STDOUT_LIMIT = 200 * 1024;
@@ -1947,6 +1953,275 @@ async function applyMergeConflictCheck(task, result, worktreeInfo) {
   return result;
 }
 
+// ── STAGE W4: WORKTREE OPERATIONAL RELIABILITY ──────────────────────────────────
+// TTL cleanup, crash recovery, and disk guardrails for worktrees.
+
+let _worktreeCleanupTimer = null;
+let _worktreeDiskBlocked = false;
+
+// Track which taskIds are actively in-flight (set during processTask, cleared on finish)
+const _activeWorktreeTaskIds = new Set();
+
+/**
+ * Scan .worktrees directory for stale entries older than TTL.
+ * Never removes worktrees for active/in-flight tasks.
+ * Returns { cleanupCount, skippedActiveCount }.
+ */
+function worktreeTtlCleanup(repoPaths) {
+  const ttlMs = CFG.worktreeTtlMs;
+  const now = Date.now();
+  let cleanupCount = 0;
+  let skippedActiveCount = 0;
+
+  for (const repoPath of repoPaths) {
+    const wtBase = path.join(repoPath, WORKTREE_BASE_DIR);
+    if (!fs.existsSync(wtBase)) continue;
+
+    let entries;
+    try {
+      entries = fs.readdirSync(wtBase, { withFileTypes: true });
+    } catch (err) {
+      log("warn", "w4-ttl-readdir-failed", { repoPath, err: err.message });
+      continue;
+    }
+
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const taskId = entry.name;
+      const wtDir = path.join(wtBase, taskId);
+
+      // Never remove active in-flight worktrees
+      if (_activeWorktreeTaskIds.has(taskId)) {
+        skippedActiveCount++;
+        continue;
+      }
+
+      // Check age by mtime of the worktree dir
+      let stat;
+      try {
+        stat = fs.statSync(wtDir);
+      } catch (_) {
+        continue;
+      }
+
+      const ageMs = now - stat.mtimeMs;
+      if (ageMs < ttlMs) continue;
+
+      // Stale — remove safely
+      log("info", "w4-ttl-cleanup", { taskId, repoPath, ageMs, ttlMs });
+      try {
+        fs.rmSync(wtDir, { recursive: true, force: true });
+        cleanupCount++;
+      } catch (err) {
+        log("warn", "w4-ttl-cleanup-failed", { taskId, repoPath, err: err.message });
+      }
+    }
+
+    // Prune git worktree registry
+    try {
+      require("child_process").execSync("git worktree prune", {
+        cwd: repoPath,
+        stdio: "ignore",
+        timeout: 10000,
+      });
+    } catch (_) {
+      // non-fatal
+    }
+  }
+
+  if (cleanupCount > 0 || skippedActiveCount > 0) {
+    log("info", "w4-ttl-cleanup-summary", { cleanup_count: cleanupCount, skipped_active_count: skippedActiveCount });
+  }
+
+  return { cleanupCount, skippedActiveCount };
+}
+
+/**
+ * Start periodic TTL cleanup timer.
+ */
+function startWorktreeCleanupTimer() {
+  if (_worktreeCleanupTimer) return;
+  const intervalMs = CFG.worktreeCleanupIntervalMs;
+  log("info", "w4-ttl-timer-start", { intervalMs, ttlMs: CFG.worktreeTtlMs });
+  _worktreeCleanupTimer = setInterval(() => {
+    try {
+      worktreeTtlCleanup(CFG.allowedRepos);
+    } catch (err) {
+      log("warn", "w4-ttl-timer-error", { err: err.message });
+    }
+  }, intervalMs);
+  // Don't prevent process exit
+  if (_worktreeCleanupTimer.unref) _worktreeCleanupTimer.unref();
+}
+
+function stopWorktreeCleanupTimer() {
+  if (_worktreeCleanupTimer) {
+    clearInterval(_worktreeCleanupTimer);
+    _worktreeCleanupTimer = null;
+  }
+}
+
+/**
+ * Crash recovery: detect orphaned worktrees from interrupted runs on startup.
+ * Since we can't query the orchestrator's queue state here, we treat all
+ * worktrees older than TTL as orphaned and remove them.
+ * Returns { recoveredCount, skippedUncertainCount }.
+ */
+function worktreeStartupRecovery(repoPaths) {
+  if (!CFG.worktreeRecoveryEnabled) {
+    log("info", "w4-recovery-disabled");
+    return { recoveredCount: 0, skippedUncertainCount: 0 };
+  }
+
+  const now = Date.now();
+  const ttlMs = CFG.worktreeTtlMs;
+  let recoveredCount = 0;
+  let skippedUncertainCount = 0;
+
+  for (const repoPath of repoPaths) {
+    const wtBase = path.join(repoPath, WORKTREE_BASE_DIR);
+    if (!fs.existsSync(wtBase)) continue;
+
+    let entries;
+    try {
+      entries = fs.readdirSync(wtBase, { withFileTypes: true });
+    } catch (err) {
+      log("warn", "w4-recovery-readdir-failed", { repoPath, err: err.message });
+      continue;
+    }
+
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const taskId = entry.name;
+      const wtDir = path.join(wtBase, taskId);
+
+      let stat;
+      try {
+        stat = fs.statSync(wtDir);
+      } catch (_) {
+        continue;
+      }
+
+      const ageMs = now - stat.mtimeMs;
+
+      if (ageMs >= ttlMs) {
+        // Clearly stale — safe to remove
+        log("info", "w4-recovery-cleanup", { taskId, repoPath, ageMs });
+        try {
+          fs.rmSync(wtDir, { recursive: true, force: true });
+          recoveredCount++;
+        } catch (err) {
+          log("warn", "w4-recovery-cleanup-failed", { taskId, repoPath, err: err.message });
+        }
+      } else {
+        // Recent worktree — uncertain state, skip with warning (prefer safety)
+        log("warn", "w4-recovery-skipped-uncertain", { taskId, repoPath, ageMs });
+        skippedUncertainCount++;
+      }
+    }
+
+    // Prune git worktree registry
+    try {
+      require("child_process").execSync("git worktree prune", {
+        cwd: repoPath,
+        stdio: "ignore",
+        timeout: 10000,
+      });
+    } catch (_) {
+      // non-fatal
+    }
+  }
+
+  log("info", "w4-recovery-summary", {
+    recovered_count: recoveredCount,
+    skipped_uncertain_count: skippedUncertainCount,
+  });
+
+  return { recoveredCount, skippedUncertainCount };
+}
+
+/**
+ * Calculate total disk usage of .worktrees directories.
+ * Returns { diskUsageBytes, worktreeCount }.
+ */
+function getWorktreeDiskUsage(repoPaths) {
+  let diskUsageBytes = 0;
+  let worktreeCount = 0;
+
+  for (const repoPath of repoPaths) {
+    const wtBase = path.join(repoPath, WORKTREE_BASE_DIR);
+    if (!fs.existsSync(wtBase)) continue;
+
+    try {
+      const entries = fs.readdirSync(wtBase, { withFileTypes: true });
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        worktreeCount++;
+        // Use du-like recursive size calculation
+        const wtDir = path.join(wtBase, entry.name);
+        diskUsageBytes += dirSizeSync(wtDir);
+      }
+    } catch (err) {
+      log("warn", "w4-disk-usage-readdir-failed", { repoPath, err: err.message });
+    }
+  }
+
+  return { diskUsageBytes, worktreeCount };
+}
+
+function dirSizeSync(dirPath) {
+  let total = 0;
+  try {
+    const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+    for (const entry of entries) {
+      const fullPath = path.join(dirPath, entry.name);
+      if (entry.isDirectory()) {
+        total += dirSizeSync(fullPath);
+      } else {
+        try {
+          total += fs.statSync(fullPath).size;
+        } catch (_) {
+          // skip unreadable files
+        }
+      }
+    }
+  } catch (_) {
+    // skip unreadable dirs
+  }
+  return total;
+}
+
+/**
+ * Check disk guardrails. Returns { allowed, diskUsageBytes, threshold, worktreeCount }.
+ * When hard-stop is enabled and threshold exceeded, `allowed` is false.
+ */
+function checkWorktreeDiskGuardrails(repoPaths) {
+  const threshold = CFG.worktreeDiskThresholdBytes;
+  const { diskUsageBytes, worktreeCount } = getWorktreeDiskUsage(repoPaths);
+  const exceeded = diskUsageBytes >= threshold;
+
+  if (exceeded) {
+    log("warn", "w4-disk-threshold-exceeded", {
+      disk_usage_bytes: diskUsageBytes,
+      threshold,
+      worktreeCount,
+      hardStop: CFG.worktreeDiskHardStop,
+    });
+  }
+
+  const allowed = !(exceeded && CFG.worktreeDiskHardStop);
+  _worktreeDiskBlocked = !allowed;
+
+  return { allowed, diskUsageBytes, threshold, worktreeCount };
+}
+
+/**
+ * Returns true if disk hard-stop is currently blocking new claims.
+ */
+function isWorktreeDiskBlocked() {
+  return _worktreeDiskBlocked;
+}
+
 // ── MAIN LOOP ──────────────────────────────────────────────────────────────────
 
 let shuttingDown = false;
@@ -2027,6 +2302,32 @@ async function processTask(task, slotCtx) {
     // ── WORKTREE SETUP ──
     originalRepoPath = task.scope?.repoPath;
     if (task.useWorktree && task.scope && task.scope.repoPath) {
+      // W4: disk guardrail check before creating worktree
+      const diskCheck = checkWorktreeDiskGuardrails(CFG.allowedRepos);
+      if (!diskCheck.allowed) {
+        log("error", "w4-disk-hard-stop", {
+          taskId: task.taskId,
+          disk_usage_bytes: diskCheck.diskUsageBytes,
+          threshold: diskCheck.threshold,
+        });
+        await sendEvent(task, "failed", "worktree", "disk threshold exceeded — hard stop enabled", {
+          disk_usage_bytes: diskCheck.diskUsageBytes,
+          threshold: diskCheck.threshold,
+        });
+        await apiPost("/api/worker/result", {
+          workerId: CFG.workerId,
+          taskId: task.taskId,
+          status: "failed",
+          mode: task.mode,
+          output: { stdout: "", stderr: "worktree disk threshold exceeded (hard stop)", truncated: false },
+          meta: { durationMs: 0, repoPath: task.scope.repoPath, branch: task.scope.branch, ...getSlotTelemetry(slotCtx.slotId) },
+        }).catch((e) => log("error", "failed to report disk hard-stop", { err: e.message }));
+        return;
+      }
+
+      // W4: track active worktree task
+      _activeWorktreeTaskIds.add(task.taskId);
+
       const baseRepo = path.resolve(task.scope.repoPath);
       try {
         const baseCommit = await gitGetBaseCommit(baseRepo);
@@ -2291,6 +2592,8 @@ async function processTask(task, slotCtx) {
     } else if (worktreeInfo && task.keepWorktree) {
       log("info", "worktree kept (keepWorktree=true)", { taskId: task.taskId, wtPath: worktreeInfo.worktreePath });
     }
+    // W4: untrack active worktree
+    _activeWorktreeTaskIds.delete(task.taskId);
 
     // Clean up slot lease + nonce
     slotStopLease(slotCtx);
@@ -2305,6 +2608,8 @@ async function processTask(task, slotCtx) {
         log("warn", "worktree cleanup failed in error handler", { err: wtErr.message })
       );
     }
+    // W4: untrack active worktree
+    if (task?.taskId) _activeWorktreeTaskIds.delete(task.taskId);
 
     slotStopLease(slotCtx);
     slotResetNonce(slotCtx);
@@ -2334,6 +2639,21 @@ async function mainLoop() {
     pollIntervalMs: CFG.pollIntervalMs,
     maxParallelWorktrees: totalSlots,
   });
+
+  // W4: crash recovery on startup
+  if (CFG.allowedRepos.length > 0) {
+    try {
+      const recovery = worktreeStartupRecovery(CFG.allowedRepos);
+      if (recovery.recoveredCount > 0 || recovery.skippedUncertainCount > 0) {
+        log("info", "w4-startup-recovery-complete", recovery);
+      }
+    } catch (err) {
+      log("warn", "w4-startup-recovery-error", { err: err.message });
+    }
+  }
+
+  // W4: start periodic TTL cleanup
+  startWorktreeCleanupTimer();
 
   while (!shuttingDown) {
     // If all slots busy, wait for any to finish
@@ -2409,6 +2729,7 @@ async function mainLoop() {
 function shutdown(signal) {
   log("info", `received ${signal}, shutting down`);
   shuttingDown = true;
+  stopWorktreeCleanupTimer();
 }
 
 process.on("SIGINT", () => shutdown("SIGINT"));
