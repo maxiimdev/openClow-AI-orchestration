@@ -211,6 +211,25 @@ function generateIdempotencyKey(taskId, endpoint, suffix) {
 // W2: nonces are per-task (Map) to support concurrent parallel slots safely.
 const _executionNonces = new Map(); // taskId → nonce
 
+// ── TASK-LEVEL TRANSIENT RETRY TRACKING ─────────────────────────────────────
+const _taskTransientRetries = new Map(); // taskId → number of transient failures
+const _dlqSentTasks = new Set();         // taskId set — idempotency guard for DLQ
+
+function recordTransientFailure(taskId) {
+  const count = (_taskTransientRetries.get(taskId) || 0) + 1;
+  _taskTransientRetries.set(taskId, count);
+  return count;
+}
+
+function getTransientFailureCount(taskId) {
+  return _taskTransientRetries.get(taskId) || 0;
+}
+
+function clearTransientFailures(taskId) {
+  _taskTransientRetries.delete(taskId);
+  // Note: _dlqSentTasks is NOT cleared here — idempotency guard is permanent per process
+}
+
 function getExecutionNonce(taskId) {
   if (!_executionNonces.has(taskId)) {
     _executionNonces.set(taskId, crypto.randomUUID());
@@ -309,14 +328,27 @@ async function sendToDeadLetter(task, error, retryCount, context) {
     log("warn", "dlq-disabled: would have sent to DLQ", {
       taskId: task?.taskId, error: error?.message,
     });
-    return;
+    return { sent: false, reason: "dlq_disabled" };
   }
+
+  // Idempotency: prevent duplicate DLQ posts for the same task within this process
+  const taskId = task?.taskId || "unknown";
+  if (_dlqSentTasks.has(taskId)) {
+    log("warn", "dlq-duplicate-suppressed", { taskId, context });
+    return { sent: false, reason: "duplicate_suppressed" };
+  }
+  _dlqSentTasks.add(taskId);
+  const isTransient = isTransientError(error);
   const dlqPayload = {
     workerId: CFG.workerId,
-    taskId: task?.taskId || "unknown",
+    taskId,
     failureReason: error?.message || "unknown error",
-    errorClass: isTransientError(error) ? "transient_exhausted" : "fatal",
+    errorClass: isTransient ? "transient_exhausted" : "fatal",
+    exhaustionReason: isTransient
+      ? `transient retries exhausted after ${retryCount} attempt(s)`
+      : "fatal error — no retry applicable",
     retryCount,
+    maxRetries: CFG.maxRetries,
     lastError: {
       message: error?.message || null,
       stack: (error?.stack || "").slice(0, 2000),
@@ -334,16 +366,22 @@ async function sendToDeadLetter(task, error, retryCount, context) {
     taskId: dlqPayload.taskId,
     failureReason: dlqPayload.failureReason,
     errorClass: dlqPayload.errorClass,
+    exhaustionReason: dlqPayload.exhaustionReason,
     retryCount,
+    maxRetries: dlqPayload.maxRetries,
   });
 
   try {
     await apiPostRaw("/api/worker/dead-letter", dlqPayload);
+    return { sent: true, payload: dlqPayload };
   } catch (dlqErr) {
     log("error", "dlq-post-failed", {
       taskId: dlqPayload.taskId,
       err: dlqErr.message,
     });
+    // Roll back idempotency guard on network failure so next attempt can retry
+    _dlqSentTasks.delete(taskId);
+    return { sent: false, reason: "post_failed", error: dlqErr.message };
   }
 }
 
@@ -2934,10 +2972,11 @@ async function processTask(task, slotCtx) {
     // W4: untrack active worktree
     _activeWorktreeTaskIds.delete(task.taskId);
 
-    // Clean up slot lease + nonce
+    // Clean up slot lease + nonce + transient retry tracking
     slotStopLease(slotCtx);
     slotResetNonce(slotCtx);
     resetExecutionNonce(task.taskId);
+    clearTransientFailures(task.taskId);
 
     resetBackoff();
   } catch (err) {
@@ -2960,11 +2999,32 @@ async function processTask(task, slotCtx) {
     log("error", "slot error", { err: err.message, slotId: slotCtx.slotId, taskId: task?.taskId, nextRetryMs: delay });
 
     if (task && !isTransientError(err)) {
+      // Fatal (non-transient) error → DLQ immediately
       log("error", "fatal-error-dlq", { taskId: task.taskId, err: err.message });
       await sendToDeadLetter(task, err, 0, "fatal error in slot");
       await sendEvent(task, "failed", "dlq", `dead-lettered: ${err.message}`);
-    } else if (task) {
-      await sendEvent(task, "failed", "other", err.message);
+      clearTransientFailures(task.taskId);
+    } else if (task && isTransientError(err)) {
+      // Transient error → track and escalate to DLQ when retries exhausted
+      const failCount = recordTransientFailure(task.taskId);
+      log("warn", "transient-failure-recorded", {
+        taskId: task.taskId,
+        failCount,
+        maxRetries: CFG.maxRetries,
+        err: err.message,
+      });
+      if (failCount >= CFG.maxRetries) {
+        log("error", "transient-retries-exhausted-dlq", {
+          taskId: task.taskId,
+          failCount,
+          maxRetries: CFG.maxRetries,
+        });
+        await sendToDeadLetter(task, err, failCount, "transient retries exhausted in slot");
+        await sendEvent(task, "failed", "dlq", `dead-lettered: transient retries exhausted (${failCount}/${CFG.maxRetries}): ${err.message}`);
+        clearTransientFailures(task.taskId);
+      } else {
+        await sendEvent(task, "failed", "transient", `transient error (${failCount}/${CFG.maxRetries}): ${err.message}`);
+      }
     }
   }
 }
