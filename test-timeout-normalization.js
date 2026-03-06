@@ -41,7 +41,7 @@ function ensureRepo(dir) {
   }
 }
 
-function runScenario({ port, task, workerEnv, afterResultMs = 600 }) {
+function runScenario({ task, workerEnv, afterResultMs = 600 }) {
   return new Promise((resolve, reject) => {
     const events = [];
     let pullCount   = 0;
@@ -92,7 +92,8 @@ function runScenario({ port, task, workerEnv, afterResultMs = 600 }) {
 
     server.on("error", reject);
 
-    server.listen(port, () => {
+    server.listen(0, () => {
+      const port = server.address().port;
       worker = spawn("node", ["worker.js"], {
         cwd: path.join(__dirname),
         env: {
@@ -101,6 +102,7 @@ function runScenario({ port, task, workerEnv, afterResultMs = 600 }) {
           WORKER_TOKEN:              "test-token",
           WORKER_ID:                 `test-worker-${port}`,
           POLL_INTERVAL_MS:          "300",
+          MAX_PARALLEL_WORKTREES:    "1",
           CLAUDE_BYPASS_PERMISSIONS: "false",
           ...workerEnv,
         },
@@ -173,7 +175,6 @@ async function testNoInstantTimeoutWithHugeInput() {
   const startMs = Date.now();
 
   const { events, resultPayload } = await runScenario({
-    port: 9884,
     task: {
       taskId:       "timeout-norm-001",
       mode:         "implement",
@@ -215,7 +216,6 @@ async function testGenuineTimeoutFires() {
 
   // timeout = 1500 ms; mock-claude sleeps 10 000 ms → must be killed by timer
   const { events, resultPayload } = await runScenario({
-    port: 9885,
     task: {
       taskId:       "timeout-norm-002",
       mode:         "implement",

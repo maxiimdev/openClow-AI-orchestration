@@ -14,7 +14,6 @@
 const http = require("http");
 const { spawn } = require("child_process");
 
-const PORT = 9878;
 let pullCount = 0;
 let worker = null;
 let receivedResults = [];
@@ -129,9 +128,7 @@ const server = http.createServer((req, res) => {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true, task: null }));
 
-      if (pullCount >= 3) {
-        setTimeout(() => finish(), 1500);
-      }
+      // finish triggered by result count, not by timer
       return;
     }
 
@@ -170,6 +167,9 @@ const server = http.createServer((req, res) => {
       }
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true }));
+      if (receivedResults.length >= 2) {
+        process.nextTick(() => finish());
+      }
       return;
     }
 
@@ -180,7 +180,10 @@ const server = http.createServer((req, res) => {
 
 let resumedTask = null;
 
+let _finished = false;
 function finish() {
+  if (_finished) return;
+  _finished = true;
   console.log(color(36, "\n" + "=".repeat(60)));
   console.log(color(36, "TEST RESULTS"));
   console.log(color(36, "=".repeat(60)));
@@ -312,7 +315,8 @@ function finish() {
   process.exit(allPass ? 0 : 1);
 }
 
-server.listen(PORT, () => {
+server.listen(0, () => {
+  const PORT = server.address().port;
   console.log(color(36, `[orch] mock orchestrator on http://localhost:${PORT}`));
   console.log(color(36, `[orch] mock claude: ${mockClaudePath}`));
   console.log(color(36, `[orch] mock repo:   ${mockRepoDir}`));
@@ -326,6 +330,7 @@ server.listen(PORT, () => {
       WORKER_TOKEN: "test-token",
       WORKER_ID: "test-worker-ni",
       POLL_INTERVAL_MS: "2000",
+      MAX_PARALLEL_WORKTREES: "1",
       CLAUDE_CMD: mockClaudePath,
       ALLOWED_REPOS: mockRepoDir,
       CLAUDE_TIMEOUT_MS: "30000",

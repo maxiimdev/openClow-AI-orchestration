@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { useTasksList } from '~/composables/useTasks'
 import { applyFilters } from '~/lib/filters'
+import { getStatusLabel } from '~/lib/mappers'
 import type { UserStatus } from '~/lib/types'
 
 const statusFilter = ref<UserStatus | ''>('')
@@ -12,7 +13,7 @@ const filteredTasks = computed(() => {
   return applyFilters(tasks, statusFilter.value, searchQuery.value)
 })
 
-const statuses = ['', 'running', 'completed', 'failed', 'needs_input', 'review_pass', 'review_fail', 'escalated']
+const statuses: (UserStatus | '')[] = ['', 'running', 'at_risk', 'completed', 'failed', 'needs_input', 'review_pass', 'review_fail', 'escalated']
 </script>
 
 <template>
@@ -34,7 +35,7 @@ const statuses = ['', 'running', 'completed', 'failed', 'needs_input', 'review_p
         :class="statusFilter === s ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'"
         @click="statusFilter = s"
       >
-        {{ s || 'All' }}
+        {{ s ? getStatusLabel(s) : 'All' }}
       </button>
     </div>
 

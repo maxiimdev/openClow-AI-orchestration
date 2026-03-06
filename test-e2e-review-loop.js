@@ -36,7 +36,6 @@ const path = require("path");
 const os = require("os");
 const { spawn, execSync } = require("child_process");
 
-const PORT = 9879;
 const PROOF_REPORT_PATH = path.join(__dirname, "test", "e2e-proof-report.json");
 
 // ── Colour helpers ─────────────────────────────────────────────────────────────
@@ -200,9 +199,7 @@ const server = http.createServer((req, res) => {
       console.log(c(33, `[orch] → pull ${pullCount}: no more tasks`));
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true }));
-      if (pullCount >= 2) {
-        setTimeout(() => finish(), 1500);
-      }
+      // finish triggered by result count, not by timer
       return;
     }
 
@@ -239,6 +236,9 @@ const server = http.createServer((req, res) => {
       }
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true }));
+      if (receivedResults.length >= 1) {
+        process.nextTick(() => finish());
+      }
       return;
     }
 
@@ -249,7 +249,10 @@ const server = http.createServer((req, res) => {
 
 // ── Assertions + proof report ──────────────────────────────────────────────────
 
+let _finished = false;
 function finish() {
+  if (_finished) return;
+  _finished = true;
   const elapsed = Date.now() - startTime;
 
   console.log(c(36, "\n" + "═".repeat(64)));
@@ -449,7 +452,8 @@ function finish() {
 
 // ── Start ──────────────────────────────────────────────────────────────────────
 
-server.listen(PORT, () => {
+server.listen(0, () => {
+  const PORT = server.address().port;
   console.log(c(36, `[orch] E2E mock orchestrator on http://localhost:${PORT}`));
   console.log(c(36, `[orch] mock claude: ${mockClaudePath}`));
   console.log(c(36, `[orch] mock repo:   ${mockRepoDir}`));
@@ -464,6 +468,7 @@ server.listen(PORT, () => {
       WORKER_TOKEN: "test-token",
       WORKER_ID: "test-worker-e2e",
       POLL_INTERVAL_MS: "500",
+      MAX_PARALLEL_WORKTREES: "1",
       CLAUDE_CMD: mockClaudePath,
       ALLOWED_REPOS: mockRepoDir,
       CLAUDE_TIMEOUT_MS: "30000",

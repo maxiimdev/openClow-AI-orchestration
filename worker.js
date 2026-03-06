@@ -44,6 +44,29 @@ const CFG = {
   reviewMaxIterations: int("REVIEW_MAX_ITERATIONS", 3),
   orchestratedLoopEnabled:
     (process.env.ORCHESTRATED_LOOP_ENABLED || "true").toLowerCase() === "true",
+  // Stage 5: anti-hang & reliability
+  leaseTtlMs: int("LEASE_TTL_MS", 300000),              // 5 min default lease
+  leaseRenewIntervalMs: int("LEASE_RENEW_INTERVAL_MS", 60000), // renew every 60s
+  maxRetries: int("MAX_RETRIES", 3),                     // transient error retries
+  retryBackoffBaseMs: int("RETRY_BACKOFF_BASE_MS", 1000), // exponential backoff base
+  dlqEnabled:
+    (process.env.DLQ_ENABLED || "true").toLowerCase() === "true",
+  idempotencyEnabled:
+    (process.env.IDEMPOTENCY_ENABLED || "true").toLowerCase() === "true",
+  // Stage W2: parallel worktree slots
+  maxParallelWorktrees: Math.max(1, int("MAX_PARALLEL_WORKTREES", 2)),
+  // Stage W4: worktree operational reliability
+  worktreeTtlMs: int("WORKTREE_TTL_MS", 3600000),                    // 1 hour default
+  worktreeCleanupIntervalMs: int("WORKTREE_CLEANUP_INTERVAL_MS", 300000), // 5 min scan
+  worktreeDiskThresholdBytes: int("WORKTREE_DISK_THRESHOLD_BYTES", 5 * 1024 * 1024 * 1024), // 5GB
+  worktreeDiskHardStop: (process.env.WORKTREE_DISK_HARD_STOP || "false").toLowerCase() === "true",
+  worktreeRecoveryEnabled: (process.env.WORKTREE_RECOVERY_ENABLED || "true").toLowerCase() === "true",
+  // Report contract guardrails
+  reportContractEnabled:
+    (process.env.REPORT_CONTRACT_ENABLED || "false").toLowerCase() === "true",
+  reportMinLength: int("REPORT_MIN_LENGTH", 50),
+  reportRetryEnabled:
+    (process.env.REPORT_RETRY_ENABLED || "false").toLowerCase() === "true",
 };
 
 const STDOUT_LIMIT = 200 * 1024;
@@ -57,6 +80,79 @@ const NEEDS_INPUT_ANCHORED_RE = /^[ \t]*\[NEEDS_INPUT\]([\s\S]*?)\[\/NEEDS_INPUT
 const REVIEW_PASS_RE = /\[REVIEW_PASS\]/i;
 const REVIEW_FAIL_RE = /\[REVIEW_FAIL(?:\s+severity=([^\]]+))?\]([\s\S]*?)\[\/REVIEW_FAIL\]/i;
 const REVIEW_FINDINGS_JSON_RE = /\[REVIEW_FINDINGS_JSON\]([\s\S]*?)\[\/REVIEW_FINDINGS_JSON\]/i;
+
+// ── REPORT CONTRACT ──────────────────────────────────────────────────────────
+const REPORT_PLACEHOLDER_PATTERNS = [
+  /^acknowledged\.?\s*(all done\.?)?$/i,
+  /^done\.?$/i,
+  /^ok\.?$/i,
+  /^completed\.?$/i,
+  /^task completed\.?$/i,
+  /^task completed successfully\.?$/i,
+  /^understood\.?\s*(proceeding\.?)?$/i,
+  /^will do\.?$/i,
+  /^sure\.?$/i,
+  /^no (?:issues|problems) found\.?$/i,
+];
+
+// ── HARD REVIEW GATE ──────────────────────────────────────────────────────────
+// State transition table: defines valid terminal statuses per mode.
+// Tasks with requireReviewGate flag cannot reach "completed" without review_pass.
+const VALID_TERMINAL_STATUSES = {
+  dry_run:    new Set(["completed", "failed", "timeout", "rejected"]),
+  implement:  new Set(["completed", "failed", "timeout", "rejected", "needs_input", "review_pass", "escalated", "needs_patch"]),
+  review:     new Set(["review_pass", "review_fail", "failed", "timeout", "rejected", "escalated", "needs_input", "needs_patch"]),
+  tests:      new Set(["completed", "failed", "timeout", "rejected"]),
+};
+
+// Statuses that are never allowed to bypass the review gate.
+// If a task has requireReviewGate=true, "completed" is only allowed after review_pass.
+const REVIEW_GATED_BLOCK = new Set(["completed"]);
+
+function enforceReviewGate(task, result) {
+  // Legacy tasks without requireReviewGate: no enforcement (backward compatible)
+  if (!task.requireReviewGate) return result;
+
+  // Review mode: completed is never valid (already handled by existing gate, but double-check)
+  if (task.mode === "review" && result.status === "completed") {
+    log("error", "review-gate-hard: completed blocked for review mode", { taskId: task.taskId });
+    result.status = "review_fail";
+    result.meta.reviewGateEnforced = true;
+    result.meta.reviewGateReason = "completed status illegal for review mode with requireReviewGate";
+    return result;
+  }
+
+  // Implement mode with review gate: completed only allowed if review was passed
+  if (task.mode === "implement" && REVIEW_GATED_BLOCK.has(result.status)) {
+    if (!result.meta.reviewVerdict || result.meta.reviewVerdict !== "pass") {
+      log("error", "review-gate-hard: completed blocked — review not passed", {
+        taskId: task.taskId,
+        reviewVerdict: result.meta.reviewVerdict || "none",
+      });
+      result.status = "escalated";
+      result.meta.reviewGateEnforced = true;
+      result.meta.reviewGateReason = "completed blocked: review gate not passed";
+      result.meta.escalationReason = result.meta.escalationReason || "review gate: task completed without review_pass";
+      return result;
+    }
+  }
+
+  // Validate against terminal status table
+  const allowed = VALID_TERMINAL_STATUSES[task.mode];
+  if (allowed && !allowed.has(result.status)) {
+    log("error", "review-gate-hard: illegal terminal status", {
+      taskId: task.taskId,
+      mode: task.mode,
+      status: result.status,
+    });
+    result.status = "failed";
+    result.meta.reviewGateEnforced = true;
+    result.meta.reviewGateReason = `illegal terminal status "${result.status}" for mode "${task.mode}"`;
+    return result;
+  }
+
+  return result;
+}
 
 function required(key) {
   const v = process.env[key];
@@ -101,9 +197,266 @@ function niDebug(msg, meta = {}) {
   log("debug", `[ni] ${msg}`, meta);
 }
 
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+// ── STAGE 5: TRANSIENT ERROR CLASSIFICATION ────────────────────────────────────
+
+function isTransientError(err) {
+  if (!err) return false;
+  const msg = err.message || "";
+  // Network-level errors
+  if (/ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENETUNREACH|EAI_AGAIN|EPIPE|socket hang up/i.test(msg)) return true;
+  // HTTP 5xx or 429 (rate limit)
+  const httpMatch = msg.match(/HTTP (\d+)/);
+  if (httpMatch) {
+    const code = parseInt(httpMatch[1], 10);
+    return code >= 500 || code === 429;
+  }
+  // fetch abort/timeout
+  if (/aborted|timeout/i.test(msg) && !/CLAUDE_TIMEOUT/i.test(msg)) return true;
+  return false;
+}
+
+// ── STAGE 5: IDEMPOTENCY ───────────────────────────────────────────────────────
+
+function generateIdempotencyKey(taskId, endpoint, suffix) {
+  const raw = `${taskId}:${endpoint}:${suffix || crypto.randomUUID()}`;
+  return crypto.createHash("sha256").update(raw).digest("hex").slice(0, 32);
+}
+
+// Per-task execution nonce — unique per pull+execute cycle.
+// Used to dedup /result and /event calls for the same task execution.
+// W2: nonces are per-task (Map) to support concurrent parallel slots safely.
+const _executionNonces = new Map(); // taskId → nonce
+
+// ── TASK-LEVEL TRANSIENT RETRY TRACKING ─────────────────────────────────────
+const _taskTransientRetries = new Map(); // taskId → number of transient failures
+const _dlqSentTasks = new Set();         // taskId set — idempotency guard for DLQ
+
+function recordTransientFailure(taskId) {
+  const count = (_taskTransientRetries.get(taskId) || 0) + 1;
+  _taskTransientRetries.set(taskId, count);
+  return count;
+}
+
+function getTransientFailureCount(taskId) {
+  return _taskTransientRetries.get(taskId) || 0;
+}
+
+function clearTransientFailures(taskId) {
+  _taskTransientRetries.delete(taskId);
+  // Note: _dlqSentTasks is NOT cleared here — idempotency guard is permanent per process
+}
+
+function getExecutionNonce(taskId) {
+  if (!_executionNonces.has(taskId)) {
+    _executionNonces.set(taskId, crypto.randomUUID());
+  }
+  return _executionNonces.get(taskId);
+}
+
+function resetExecutionNonce(taskId) {
+  if (taskId) {
+    _executionNonces.delete(taskId);
+  } else {
+    _executionNonces.clear();
+  }
+}
+
+// ── STAGE W2: PER-SLOT CONTEXT ──────────────────────────────────────────────────
+// Each parallel slot gets its own lease timer, execution nonce, and telemetry.
+
+const _activeSlots = new Map(); // slotId → { taskId, promise }
+
+function createSlotContext(slotId) {
+  return {
+    slotId,
+    taskId: null,
+    nonce: null,
+    leaseTimer: null,
+    leaseExpired: false,
+  };
+}
+
+function slotGetNonce(ctx, taskId) {
+  if (!ctx.nonce || ctx.taskId !== taskId) {
+    ctx.taskId = taskId;
+    ctx.nonce = crypto.randomUUID();
+  }
+  return ctx.nonce;
+}
+
+function slotResetNonce(ctx) {
+  ctx.nonce = null;
+  ctx.taskId = null;
+}
+
+function slotStartLease(ctx, taskId) {
+  slotStopLease(ctx);
+  ctx.leaseExpired = false;
+  const renewMs = CFG.leaseRenewIntervalMs;
+  const ttlMs = CFG.leaseTtlMs;
+
+  log("info", "lease-start", { taskId, slotId: ctx.slotId, ttlMs, renewMs });
+
+  ctx.leaseTimer = setInterval(async () => {
+    if (ctx.leaseExpired) return;
+    try {
+      const res = await apiPostRaw("/api/worker/lease-renew", {
+        workerId: CFG.workerId,
+        taskId,
+        leaseTtlMs: ttlMs,
+      });
+      if (res && res.expired) {
+        ctx.leaseExpired = true;
+        log("warn", "lease-expired-server", { taskId, slotId: ctx.slotId });
+        slotStopLease(ctx);
+      } else {
+        log("debug", "lease-renewed", { taskId, slotId: ctx.slotId });
+      }
+    } catch (err) {
+      log("warn", "lease-renew-failed", { taskId, slotId: ctx.slotId, err: err.message });
+    }
+  }, renewMs);
+}
+
+function slotStopLease(ctx) {
+  if (ctx.leaseTimer) {
+    clearInterval(ctx.leaseTimer);
+    ctx.leaseTimer = null;
+  }
+}
+
+function slotIsLeaseExpired(ctx) {
+  return ctx.leaseExpired;
+}
+
+function getSlotTelemetry(slotId) {
+  return {
+    slotId,
+    activeSlots: _activeSlots.size,
+    totalSlots: CFG.maxParallelWorktrees,
+  };
+}
+
+// ── STAGE 5: DEAD-LETTER QUEUE ─────────────────────────────────────────────────
+
+async function sendToDeadLetter(task, error, retryCount, context) {
+  if (!CFG.dlqEnabled) {
+    log("warn", "dlq-disabled: would have sent to DLQ", {
+      taskId: task?.taskId, error: error?.message,
+    });
+    return { sent: false, reason: "dlq_disabled" };
+  }
+
+  // Idempotency: prevent duplicate DLQ posts for the same task within this process
+  const taskId = task?.taskId || "unknown";
+  if (_dlqSentTasks.has(taskId)) {
+    log("warn", "dlq-duplicate-suppressed", { taskId, context });
+    return { sent: false, reason: "duplicate_suppressed" };
+  }
+  _dlqSentTasks.add(taskId);
+  const isTransient = isTransientError(error);
+  const dlqPayload = {
+    workerId: CFG.workerId,
+    taskId,
+    failureReason: error?.message || "unknown error",
+    errorClass: isTransient ? "transient_exhausted" : "fatal",
+    exhaustionReason: isTransient
+      ? `transient retries exhausted after ${retryCount} attempt(s)`
+      : "fatal error — no retry applicable",
+    retryCount,
+    maxRetries: CFG.maxRetries,
+    lastError: {
+      message: error?.message || null,
+      stack: (error?.stack || "").slice(0, 2000),
+    },
+    taskSnapshot: task ? {
+      mode: task.mode,
+      taskId: task.taskId,
+      scope: task.scope || null,
+    } : null,
+    context: context || null,
+    dlqAt: new Date().toISOString(),
+  };
+
+  log("error", "dlq-transition", {
+    taskId: dlqPayload.taskId,
+    failureReason: dlqPayload.failureReason,
+    errorClass: dlqPayload.errorClass,
+    exhaustionReason: dlqPayload.exhaustionReason,
+    retryCount,
+    maxRetries: dlqPayload.maxRetries,
+  });
+
+  try {
+    await apiPostRaw("/api/worker/dead-letter", dlqPayload);
+    return { sent: true, payload: dlqPayload };
+  } catch (dlqErr) {
+    log("error", "dlq-post-failed", {
+      taskId: dlqPayload.taskId,
+      err: dlqErr.message,
+    });
+    // Roll back idempotency guard on network failure so next attempt can retry
+    _dlqSentTasks.delete(taskId);
+    return { sent: false, reason: "post_failed", error: dlqErr.message };
+  }
+}
+
+// ── STAGE 5: LEASE MANAGEMENT ──────────────────────────────────────────────────
+
+let _leaseTimer = null;
+let _leaseTaskId = null;
+let _leaseExpired = false;
+
+function startLeaseRenewal(taskId) {
+  stopLeaseRenewal();
+  _leaseTaskId = taskId;
+  _leaseExpired = false;
+  const renewMs = CFG.leaseRenewIntervalMs;
+  const ttlMs = CFG.leaseTtlMs;
+
+  log("info", "lease-start", { taskId, ttlMs, renewMs });
+
+  _leaseTimer = setInterval(async () => {
+    if (_leaseExpired) return;
+    try {
+      const res = await apiPostRaw("/api/worker/lease-renew", {
+        workerId: CFG.workerId,
+        taskId,
+        leaseTtlMs: ttlMs,
+      });
+      if (res && res.expired) {
+        _leaseExpired = true;
+        log("warn", "lease-expired-server", { taskId });
+        stopLeaseRenewal();
+      } else {
+        log("debug", "lease-renewed", { taskId });
+      }
+    } catch (err) {
+      log("warn", "lease-renew-failed", { taskId, err: err.message });
+    }
+  }, renewMs);
+}
+
+function stopLeaseRenewal() {
+  if (_leaseTimer) {
+    clearInterval(_leaseTimer);
+    _leaseTimer = null;
+  }
+  _leaseTaskId = null;
+}
+
+function isLeaseExpired() {
+  return _leaseExpired;
+}
+
 // ── HTTP (native fetch, Node 18+) ──────────────────────────────────────────────
 
-async function apiPost(endpoint, body) {
+// Raw API post — no retry, no idempotency. Used by internal infra (lease, DLQ).
+async function apiPostRaw(endpoint, body) {
   const url = `${CFG.orchBaseUrl}${endpoint}`;
   const res = await fetch(url, {
     method: "POST",
@@ -119,6 +472,63 @@ async function apiPost(endpoint, body) {
     throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`);
   }
   return res.json();
+}
+
+async function apiPost(endpoint, body, opts = {}) {
+  const maxRetries = opts.retries ?? CFG.maxRetries;
+  const taskId = body?.taskId || "unknown";
+
+  // Attach idempotency key for write endpoints
+  if (CFG.idempotencyEnabled && !body._idempotencyKey) {
+    const writeEndpoints = ["/api/worker/event", "/api/worker/result"];
+    if (writeEndpoints.some((e) => endpoint.includes(e))) {
+      const nonce = getExecutionNonce(taskId);
+      const suffix = `${nonce}:${endpoint}:${body?.status || ""}:${body?.phase || ""}`;
+      body._idempotencyKey = generateIdempotencyKey(taskId, endpoint, suffix);
+    }
+  }
+
+  let lastErr = null;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const url = `${CFG.orchBaseUrl}${endpoint}`;
+      const headers = {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${CFG.workerToken}`,
+      };
+      if (body._idempotencyKey) {
+        headers["Idempotency-Key"] = body._idempotencyKey;
+      }
+      const res = await fetch(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(15000),
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`);
+      }
+      return res.json();
+    } catch (err) {
+      lastErr = err;
+      if (attempt < maxRetries && isTransientError(err)) {
+        const delayMs = CFG.retryBackoffBaseMs * Math.pow(2, attempt);
+        log("warn", "api-retry", {
+          endpoint,
+          taskId,
+          attempt: attempt + 1,
+          maxRetries,
+          delayMs,
+          err: err.message,
+        });
+        await sleep(delayMs);
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastErr;
 }
 
 // ── EVENTS ──────────────────────────────────────────────────────────────────
@@ -342,6 +752,56 @@ function extractClaudeResult(stdout) {
     if (typeof obj.result === "string") return obj.result;
   } catch { /* not JSON */ }
   return null;
+}
+
+// ── REPORT CONTRACT VALIDATION ───────────────────────────────────────────────
+
+function validateReportContract(stdout, task) {
+  // Skip validation for modes that intentionally produce short output
+  if (task.mode === "dry_run" || task.mode === "tests") return null;
+  // Explicit opt-out
+  if (task.allowShortReport) return null;
+  // Only validate when contract is enabled
+  if (!CFG.reportContractEnabled) return null;
+
+  const resultText = extractClaudeResult(stdout);
+
+  // Rule 1: empty result
+  if (resultText === null || resultText.trim() === "") {
+    return {
+      reason: "empty_result",
+      message: "Report contract violation: result is empty",
+      length: resultText ? resultText.length : 0,
+      pattern: null,
+    };
+  }
+
+  const trimmed = resultText.trim();
+
+  // Rule 2: placeholder pattern match
+  for (const re of REPORT_PLACEHOLDER_PATTERNS) {
+    if (re.test(trimmed)) {
+      return {
+        reason: "placeholder_match",
+        message: `Report contract violation: result matches placeholder pattern: ${re.source}`,
+        length: trimmed.length,
+        pattern: re.source,
+      };
+    }
+  }
+
+  // Rule 3: below minimum useful length
+  const minLen = task.reportMinLength || CFG.reportMinLength;
+  if (trimmed.length < minLen) {
+    return {
+      reason: "below_min_length",
+      message: `Report contract violation: result length ${trimmed.length} < minimum ${minLen}`,
+      length: trimmed.length,
+      pattern: null,
+    };
+  }
+
+  return null; // valid
 }
 
 function normalizeOptions(raw) {
@@ -602,6 +1062,150 @@ async function buildReviewTaskWithDiff(task, iteration) {
   };
 }
 
+// ── STAGE 3: CLEAN-CONTEXT REVIEW ISOLATION ──────────────────────────────────
+
+// Get list of changed files with status (A/M/D) via git diff.
+function getChangedFiles(repoPath) {
+  return new Promise((resolve) => {
+    const child = spawn("git", ["diff", "--name-status", "HEAD"], {
+      cwd: repoPath,
+      shell: false,
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 10000,
+    });
+    let out = "";
+    child.stdout.on("data", (c) => { if (out.length < 50000) out += c; });
+    child.on("close", () => {
+      const files = out.trim().split("\n").filter(Boolean).map((line) => {
+        const [status, ...rest] = line.split("\t");
+        return { status: status.trim(), file: rest.join("\t").trim() };
+      });
+      resolve(files);
+    });
+    child.on("error", () => resolve([]));
+  });
+}
+
+// Build an isolated review packet containing only what the reviewer needs.
+// No implementer transcript, instructions, or conversational state leaks through.
+async function buildReviewPacket(task, repoPath) {
+  const [diff, changedFiles] = await Promise.all([
+    getGitDiff(repoPath).catch(() => null),
+    getChangedFiles(repoPath).catch(() => []),
+  ]);
+
+  const packet = {
+    taskId: task.taskId,
+    mode: "review",
+    repoPath,
+    branch: task.scope?.branch || "unknown",
+    changedFiles,
+    diff: (diff || "").slice(0, 30000),
+    checklist: task.checklist || task.constraints || [
+      "No regressions introduced",
+      "Code correctness and logic errors",
+      "Security vulnerabilities (OWASP top 10)",
+      "Error handling coverage",
+      "No dead code or debug artifacts",
+    ],
+    isolationInstruction: "You are an independent code reviewer. You must NOT assume any prior context, conversation history, or implementation intent. Evaluate the code changes purely on their technical merit. Be objective and unbiased. Do not infer or reconstruct the implementer's reasoning — review only what is present in the diff and repository state.",
+    createdAt: new Date().toISOString(),
+  };
+
+  // Add iteration context for re-reviews
+  if (task._reviewIteration && task._reviewIteration > 1) {
+    packet.iterationContext = {
+      iteration: task._reviewIteration,
+      previousFindings: task.previousReviewFindings || null,
+    };
+  }
+
+  return packet;
+}
+
+// Hash a review packet for telemetry proof of isolation.
+function hashReviewPacket(packet) {
+  const serialized = JSON.stringify(packet);
+  return {
+    hash: crypto.createHash("sha256").update(serialized).digest("hex"),
+    size: Buffer.byteLength(serialized, "utf-8"),
+  };
+}
+
+// Build a prompt from an isolated review packet (no task.instructions leak).
+function buildIsolatedReviewPrompt(packet) {
+  const parts = [];
+
+  parts.push(`# Code Review [${packet.taskId}]`);
+  parts.push(`\n${packet.isolationInstruction}`);
+  parts.push(`\nRepo: ${packet.repoPath}`);
+  parts.push(`Branch: ${packet.branch}`);
+
+  if (packet.changedFiles.length > 0) {
+    parts.push(`\n## Changed Files`);
+    for (const f of packet.changedFiles) {
+      parts.push(`- [${f.status}] ${f.file}`);
+    }
+  }
+
+  if (packet.diff) {
+    parts.push(`\n## Diff\n\`\`\`diff\n${packet.diff}\n\`\`\``);
+  }
+
+  if (packet.checklist && packet.checklist.length > 0) {
+    parts.push(`\n## Review Checklist`);
+    for (const item of packet.checklist) {
+      parts.push(`- [ ] ${item}`);
+    }
+  }
+
+  if (packet.iterationContext) {
+    parts.push(`\n## Previous Review Findings (iteration ${packet.iterationContext.iteration})`);
+    parts.push(`Verify whether the following issues from the prior review have been resolved:`);
+    if (packet.iterationContext.previousFindings) {
+      parts.push(packet.iterationContext.previousFindings);
+    }
+  }
+
+  return parts.join("\n");
+}
+
+// Execute a review task in isolated mode: builds review packet, uses isolated prompt,
+// adds telemetry proving no context leakage.
+async function executeIsolatedReview(task, stepCtx) {
+  const repoPath = path.resolve(task.scope.repoPath);
+  const packet = await buildReviewPacket(task, repoPath);
+  const { hash, size } = hashReviewPacket(packet);
+
+  log("info", "isolated_review: built review packet", {
+    taskId: task.taskId,
+    reviewPacketHash: hash,
+    reviewPacketSize: size,
+    changedFilesCount: packet.changedFiles.length,
+    hasDiff: !!packet.diff,
+  });
+
+  // Create a minimal task that carries ONLY the isolated prompt
+  const isolatedTask = {
+    taskId: task.taskId,
+    mode: "review",
+    scope: task.scope,
+    model: task.model,
+    // The prompt is built from the packet, not from task.instructions
+    _isolatedPrompt: buildIsolatedReviewPrompt(packet),
+  };
+
+  const result = await executeTask(isolatedTask, stepCtx);
+
+  // Inject telemetry fields proving isolation
+  result.meta.isolatedRun = true;
+  result.meta.reviewPacketHash = hash;
+  result.meta.reviewPacketSize = size;
+  result.meta.changedFilesCount = packet.changedFiles.length;
+
+  return result;
+}
+
 // ── REVIEW LOOP ───────────────────────────────────────────────────────────────
 
 // Runs the full review-patch-review loop for a task with reviewLoop:true.
@@ -649,15 +1253,23 @@ async function runReviewLoop(task, stepCtx) {
     }
 
     // ── REVIEW (fresh context, with diff on re-reviews) ──
-    const reviewTask = iter > 1
+    const reviewTaskBase2 = iter > 1
       ? await buildReviewTaskWithDiff(task, iter)
       : task;
+    const reviewTask = { ...reviewTaskBase2 };
+    // Stage 3 isolation fields — only set when isolatedReview is enabled
+    if (task.isolatedReview) {
+      reviewTask._reviewIteration = iter;
+      reviewTask.previousReviewFindings = currentFindings;
+    }
     await sendEvent(task, "progress", "review_loop",
       `review run (iteration ${iter}/${maxIter})`,
-      { phase: "review", iteration: iter, maxIter }
+      { phase: "review", iteration: iter, maxIter, isolatedReview: !!task.isolatedReview }
     );
-    log("info", "review_loop: review run", { taskId: task.taskId, iter });
-    const reviewResult = await executeTask(reviewTask, stepCtx);
+    log("info", "review_loop: review run", { taskId: task.taskId, iter, isolatedReview: !!task.isolatedReview });
+    const reviewResult = task.isolatedReview
+      ? await executeIsolatedReview(reviewTask, stepCtx)
+      : await executeTask(reviewTask, stepCtx);
     lastOutput = reviewResult.output;
     lastMeta = reviewResult.meta;
 
@@ -840,14 +1452,21 @@ async function runOrchestratedLoop(task, stepCtx) {
       reviewLoop: false,
       orchestratedLoop: false,
     };
+    // Stage 3 isolation fields — only set when isolatedReview is enabled
+    if (task.isolatedReview) {
+      reviewTask._reviewIteration = iter;
+      reviewTask.previousReviewFindings = currentFindings;
+    }
 
     await emitContextReset(task, "review", iter, maxIter);
     await sendEvent(task, "progress", "orchestrate",
       `phase:review (iter ${iter}/${maxIter}) — spawning fresh Claude session`,
-      { phase: "review", iteration: iter, maxIter, contextReset: true }
+      { phase: "review", iteration: iter, maxIter, contextReset: true, isolatedReview: !!task.isolatedReview }
     );
-    log("info", "orchestrated_loop: review run", { taskId: task.taskId, iter });
-    const reviewResult = await executeTask(reviewTask, stepCtx);
+    log("info", "orchestrated_loop: review run", { taskId: task.taskId, iter, isolatedReview: !!task.isolatedReview });
+    const reviewResult = task.isolatedReview
+      ? await executeIsolatedReview(reviewTask, stepCtx)
+      : await executeTask(reviewTask, stepCtx);
 
     const rv = parseReviewVerdict(reviewResult.output.stdout);
     const sf = parseStructuredFindings(reviewResult.output.stdout);
@@ -954,12 +1573,14 @@ function buildPlan(task) {
       "report",
     ];
   }
-  return [
+  const steps = [
     "validate",
     `checkout ${branch}`,
     `spawn claude (${model})`,
-    "report",
   ];
+  if (task.requireReviewGate) steps.push("review_gate");
+  steps.push("report");
+  return steps;
 }
 
 // ── EXECUTE ────────────────────────────────────────────────────────────────────
@@ -989,7 +1610,7 @@ async function executeTask(task, stepCtx) {
     };
   }
 
-  const prompt = buildPrompt(task);
+  const prompt = task._isolatedPrompt || buildPrompt(task);
   const repoPath = path.resolve(task.scope.repoPath);
 
   // checkout branch
@@ -1195,6 +1816,850 @@ function gitCheckout(cwd, branch) {
   });
 }
 
+// ── WORKTREE ───────────────────────────────────────────────────────────────────
+
+const WORKTREE_BASE_DIR = ".worktrees";
+
+function worktreePath(repoPath, taskId) {
+  return path.join(repoPath, WORKTREE_BASE_DIR, taskId);
+}
+
+function gitGetBaseCommit(cwd) {
+  return new Promise((resolve, reject) => {
+    const child = spawn("git", ["rev-parse", "HEAD"], {
+      cwd,
+      shell: false,
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 10000,
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (c) => (stdout += c));
+    child.stderr.on("data", (c) => (stderr += c));
+    child.on("close", (code) => {
+      if (code === 0) resolve(stdout.trim());
+      else reject(new Error(`git rev-parse HEAD failed (${code}): ${stderr.trim()}`));
+    });
+    child.on("error", reject);
+  });
+}
+
+async function createWorktree(repoPath, taskId, branch) {
+  const wtPath = worktreePath(repoPath, taskId);
+  // Ensure parent dir exists
+  const parentDir = path.dirname(wtPath);
+  if (!fs.existsSync(parentDir)) {
+    fs.mkdirSync(parentDir, { recursive: true });
+  }
+
+  return new Promise((resolve, reject) => {
+    const child = spawn("git", ["worktree", "add", "-B", branch, wtPath], {
+      cwd: repoPath,
+      shell: false,
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 30000,
+    });
+    let stderr = "";
+    child.stderr.on("data", (c) => (stderr += c));
+    child.on("close", (code) => {
+      if (code === 0) resolve(wtPath);
+      else reject(new Error(`git worktree add failed (${code}): ${stderr.trim()}`));
+    });
+    child.on("error", reject);
+  });
+}
+
+async function removeWorktree(repoPath, taskId) {
+  const wtPath = worktreePath(repoPath, taskId);
+  try {
+    await new Promise((resolve, reject) => {
+      const child = spawn("git", ["worktree", "remove", "--force", wtPath], {
+        cwd: repoPath,
+        shell: false,
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout: 15000,
+      });
+      let stderr = "";
+      child.stderr.on("data", (c) => (stderr += c));
+      child.on("close", (code) => {
+        if (code === 0) resolve();
+        else reject(new Error(`git worktree remove failed (${code}): ${stderr.trim()}`));
+      });
+      child.on("error", reject);
+    });
+  } catch (err) {
+    // Failure-safe: log warning but do not crash
+    log("warn", "worktree cleanup failed", { repoPath, taskId, err: err.message });
+    // Fallback: try to remove directory manually
+    try {
+      if (fs.existsSync(wtPath)) {
+        fs.rmSync(wtPath, { recursive: true, force: true });
+      }
+      // Prune stale worktree entries
+      spawn("git", ["worktree", "prune"], {
+        cwd: repoPath,
+        shell: false,
+        stdio: "ignore",
+        timeout: 10000,
+      });
+    } catch (cleanupErr) {
+      log("warn", "worktree fallback cleanup also failed", { repoPath, taskId, err: cleanupErr.message });
+    }
+  }
+}
+
+// ── STAGE W3: MERGE POLICY + SAFETY GATE ────────────────────────────────────────
+// No worktree branch may reach merge_ready/completed unless quality gates pass.
+// Gates: review (when requireReviewGate or reviewLoop), tests (when requireTestsGate).
+// Conflict detection: checks merge-base divergence before allowing merge_ready.
+
+const MERGE_GATE_STATUSES = new Set(["completed", "merge_ready"]);
+
+function evaluateMergeGate(task, result) {
+  // Only apply to worktree tasks with merge gate enabled
+  if (!task.useWorktree || !task.mergePolicy) return result;
+
+  const policy = task.mergePolicy; // { requireReview, requireTests, targetBranch }
+
+  // Only gate statuses that would indicate "done/ready to merge"
+  if (!MERGE_GATE_STATUSES.has(result.status)) return result;
+
+  const gateFailures = [];
+
+  // Gate 1: Review must have passed
+  if (policy.requireReview) {
+    const reviewPassed = result.meta.reviewVerdict === "pass" ||
+                         result.status === "review_pass" ||
+                         result.meta.mergeGateReviewOverride === true;
+    if (!reviewPassed) {
+      gateFailures.push("review_not_passed");
+    }
+  }
+
+  // Gate 2: Tests must have passed
+  if (policy.requireTests) {
+    const testsPassed = result.meta.testsVerdict === "pass" ||
+                        result.meta.mergeGateTestsOverride === true;
+    if (!testsPassed) {
+      gateFailures.push("tests_not_passed");
+    }
+  }
+
+  if (gateFailures.length === 0) return result;
+
+  // Gates failed: block merge-ready/completed
+  const reason = gateFailures.join(", ");
+  log("warn", "merge-gate-blocked", {
+    taskId: task.taskId,
+    originalStatus: result.status,
+    gateFailures,
+    reason,
+  });
+
+  result.meta.mergeGateBlocked = true;
+  result.meta.gate_blocked_reason = reason;
+  result.meta.mergeGateFailures = gateFailures;
+
+  // Determine transition: needs_patch if review failed, escalated if only tests failed
+  if (gateFailures.includes("review_not_passed")) {
+    result.status = "needs_patch";
+  } else {
+    result.status = "escalated";
+    result.meta.escalationReason = `merge gate: ${reason}`;
+  }
+
+  return result;
+}
+
+// Conflict-aware merge prep: detect merge conflicts before merge-ready
+function detectMergeConflict(repoPath, sourceBranch, targetBranch) {
+  return new Promise((resolve) => {
+    // Use git merge-tree to do a three-way merge check without touching the working tree
+    // First get the merge base
+    const child = spawn("git", ["merge-base", targetBranch, sourceBranch], {
+      cwd: repoPath,
+      shell: false,
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 15000,
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (c) => (stdout += c));
+    child.stderr.on("data", (c) => (stderr += c));
+    child.on("close", (code) => {
+      if (code !== 0) {
+        // Cannot determine merge base — likely no common ancestor
+        resolve({ conflict: true, reason: `merge-base failed: ${stderr.trim() || "no common ancestor"}` });
+        return;
+      }
+      const mergeBase = stdout.trim();
+      // Now do a dry merge-tree check
+      const mtChild = spawn("git", ["merge-tree", mergeBase, targetBranch, sourceBranch], {
+        cwd: repoPath,
+        shell: false,
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout: 15000,
+      });
+      let mtOut = "";
+      mtChild.stdout.on("data", (c) => (mtOut += c));
+      mtChild.on("close", (mtCode) => {
+        // merge-tree outputs conflict markers if there are conflicts
+        const hasConflict = mtOut.includes("<<<<<<") || mtOut.includes("changed in both");
+        if (hasConflict) {
+          resolve({ conflict: true, reason: "merge conflict detected in merge-tree output" });
+        } else {
+          resolve({ conflict: false, reason: null });
+        }
+      });
+      mtChild.on("error", (err) => {
+        resolve({ conflict: true, reason: `merge-tree error: ${err.message}` });
+      });
+    });
+    child.on("error", (err) => {
+      resolve({ conflict: true, reason: `merge-base error: ${err.message}` });
+    });
+  });
+}
+
+async function applyMergeConflictCheck(task, result, worktreeInfo) {
+  // Only check for worktree tasks with merge policy and successful gates so far
+  if (!task.useWorktree || !task.mergePolicy) return result;
+  if (!worktreeInfo) return result;
+  if (!MERGE_GATE_STATUSES.has(result.status) && result.status !== "review_pass") return result;
+
+  const targetBranch = task.mergePolicy.targetBranch || "main";
+  const sourceBranch = worktreeInfo.branch;
+
+  try {
+    const conflictResult = await detectMergeConflict(
+      worktreeInfo.baseRepoPath,
+      sourceBranch,
+      targetBranch
+    );
+    result.meta.mergeConflictCheck = conflictResult.conflict ? "conflict" : "clean";
+
+    if (conflictResult.conflict) {
+      log("warn", "merge-conflict-detected", {
+        taskId: task.taskId,
+        sourceBranch,
+        targetBranch,
+        reason: conflictResult.reason,
+      });
+      result.meta.mergeGateBlocked = true;
+      result.meta.gate_blocked_reason =
+        (result.meta.gate_blocked_reason ? result.meta.gate_blocked_reason + ", " : "") +
+        "merge_conflict";
+      result.meta.mergeConflictReason = conflictResult.reason;
+      result.status = "escalated";
+      result.meta.escalationReason = `merge conflict: ${conflictResult.reason}`;
+    }
+  } catch (err) {
+    log("warn", "merge-conflict-check-failed", {
+      taskId: task.taskId,
+      err: err.message,
+    });
+    // Non-fatal: do not block on conflict check failure
+    result.meta.mergeConflictCheck = "error";
+    result.meta.mergeConflictCheckError = err.message;
+  }
+
+  return result;
+}
+
+// ── STAGE W4: WORKTREE OPERATIONAL RELIABILITY ──────────────────────────────────
+// TTL cleanup, crash recovery, and disk guardrails for worktrees.
+
+let _worktreeCleanupTimer = null;
+let _worktreeDiskBlocked = false;
+
+// Track which taskIds are actively in-flight (set during processTask, cleared on finish)
+const _activeWorktreeTaskIds = new Set();
+
+/**
+ * Scan .worktrees directory for stale entries older than TTL.
+ * Never removes worktrees for active/in-flight tasks.
+ * Returns { cleanupCount, skippedActiveCount }.
+ */
+function worktreeTtlCleanup(repoPaths) {
+  const ttlMs = CFG.worktreeTtlMs;
+  const now = Date.now();
+  let cleanupCount = 0;
+  let skippedActiveCount = 0;
+
+  for (const repoPath of repoPaths) {
+    const wtBase = path.join(repoPath, WORKTREE_BASE_DIR);
+    if (!fs.existsSync(wtBase)) continue;
+
+    let entries;
+    try {
+      entries = fs.readdirSync(wtBase, { withFileTypes: true });
+    } catch (err) {
+      log("warn", "w4-ttl-readdir-failed", { repoPath, err: err.message });
+      continue;
+    }
+
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const taskId = entry.name;
+      const wtDir = path.join(wtBase, taskId);
+
+      // Never remove active in-flight worktrees
+      if (_activeWorktreeTaskIds.has(taskId)) {
+        skippedActiveCount++;
+        continue;
+      }
+
+      // Check age by mtime of the worktree dir
+      let stat;
+      try {
+        stat = fs.statSync(wtDir);
+      } catch (_) {
+        continue;
+      }
+
+      const ageMs = now - stat.mtimeMs;
+      if (ageMs < ttlMs) continue;
+
+      // Stale — remove safely
+      log("info", "w4-ttl-cleanup", { taskId, repoPath, ageMs, ttlMs });
+      try {
+        fs.rmSync(wtDir, { recursive: true, force: true });
+        cleanupCount++;
+      } catch (err) {
+        log("warn", "w4-ttl-cleanup-failed", { taskId, repoPath, err: err.message });
+      }
+    }
+
+    // Prune git worktree registry
+    try {
+      require("child_process").execSync("git worktree prune", {
+        cwd: repoPath,
+        stdio: "ignore",
+        timeout: 10000,
+      });
+    } catch (_) {
+      // non-fatal
+    }
+  }
+
+  if (cleanupCount > 0 || skippedActiveCount > 0) {
+    log("info", "w4-ttl-cleanup-summary", { cleanup_count: cleanupCount, skipped_active_count: skippedActiveCount });
+  }
+
+  return { cleanupCount, skippedActiveCount };
+}
+
+/**
+ * Start periodic TTL cleanup timer.
+ */
+function startWorktreeCleanupTimer() {
+  if (_worktreeCleanupTimer) return;
+  const intervalMs = CFG.worktreeCleanupIntervalMs;
+  log("info", "w4-ttl-timer-start", { intervalMs, ttlMs: CFG.worktreeTtlMs });
+  _worktreeCleanupTimer = setInterval(() => {
+    try {
+      worktreeTtlCleanup(CFG.allowedRepos);
+    } catch (err) {
+      log("warn", "w4-ttl-timer-error", { err: err.message });
+    }
+  }, intervalMs);
+  // Don't prevent process exit
+  if (_worktreeCleanupTimer.unref) _worktreeCleanupTimer.unref();
+}
+
+function stopWorktreeCleanupTimer() {
+  if (_worktreeCleanupTimer) {
+    clearInterval(_worktreeCleanupTimer);
+    _worktreeCleanupTimer = null;
+  }
+}
+
+/**
+ * Crash recovery: detect orphaned worktrees from interrupted runs on startup.
+ * Since we can't query the orchestrator's queue state here, we treat all
+ * worktrees older than TTL as orphaned and remove them.
+ * Returns { recoveredCount, skippedUncertainCount }.
+ */
+function worktreeStartupRecovery(repoPaths) {
+  if (!CFG.worktreeRecoveryEnabled) {
+    log("info", "w4-recovery-disabled");
+    return { recoveredCount: 0, skippedUncertainCount: 0 };
+  }
+
+  const now = Date.now();
+  const ttlMs = CFG.worktreeTtlMs;
+  let recoveredCount = 0;
+  let skippedUncertainCount = 0;
+
+  for (const repoPath of repoPaths) {
+    const wtBase = path.join(repoPath, WORKTREE_BASE_DIR);
+    if (!fs.existsSync(wtBase)) continue;
+
+    let entries;
+    try {
+      entries = fs.readdirSync(wtBase, { withFileTypes: true });
+    } catch (err) {
+      log("warn", "w4-recovery-readdir-failed", { repoPath, err: err.message });
+      continue;
+    }
+
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const taskId = entry.name;
+      const wtDir = path.join(wtBase, taskId);
+
+      let stat;
+      try {
+        stat = fs.statSync(wtDir);
+      } catch (_) {
+        continue;
+      }
+
+      const ageMs = now - stat.mtimeMs;
+
+      if (ageMs >= ttlMs) {
+        // Clearly stale — safe to remove
+        log("info", "w4-recovery-cleanup", { taskId, repoPath, ageMs });
+        try {
+          fs.rmSync(wtDir, { recursive: true, force: true });
+          recoveredCount++;
+        } catch (err) {
+          log("warn", "w4-recovery-cleanup-failed", { taskId, repoPath, err: err.message });
+        }
+      } else {
+        // Recent worktree — uncertain state, skip with warning (prefer safety)
+        log("warn", "w4-recovery-skipped-uncertain", { taskId, repoPath, ageMs });
+        skippedUncertainCount++;
+      }
+    }
+
+    // Prune git worktree registry
+    try {
+      require("child_process").execSync("git worktree prune", {
+        cwd: repoPath,
+        stdio: "ignore",
+        timeout: 10000,
+      });
+    } catch (_) {
+      // non-fatal
+    }
+  }
+
+  log("info", "w4-recovery-summary", {
+    recovered_count: recoveredCount,
+    skipped_uncertain_count: skippedUncertainCount,
+  });
+
+  return { recoveredCount, skippedUncertainCount };
+}
+
+/**
+ * Calculate total disk usage of .worktrees directories.
+ * Returns { diskUsageBytes, worktreeCount }.
+ */
+function getWorktreeDiskUsage(repoPaths) {
+  let diskUsageBytes = 0;
+  let worktreeCount = 0;
+
+  for (const repoPath of repoPaths) {
+    const wtBase = path.join(repoPath, WORKTREE_BASE_DIR);
+    if (!fs.existsSync(wtBase)) continue;
+
+    try {
+      const entries = fs.readdirSync(wtBase, { withFileTypes: true });
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        worktreeCount++;
+        // Use du-like recursive size calculation
+        const wtDir = path.join(wtBase, entry.name);
+        diskUsageBytes += dirSizeSync(wtDir);
+      }
+    } catch (err) {
+      log("warn", "w4-disk-usage-readdir-failed", { repoPath, err: err.message });
+    }
+  }
+
+  return { diskUsageBytes, worktreeCount };
+}
+
+function dirSizeSync(dirPath) {
+  let total = 0;
+  try {
+    const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+    for (const entry of entries) {
+      const fullPath = path.join(dirPath, entry.name);
+      if (entry.isDirectory()) {
+        total += dirSizeSync(fullPath);
+      } else {
+        try {
+          total += fs.statSync(fullPath).size;
+        } catch (_) {
+          // skip unreadable files
+        }
+      }
+    }
+  } catch (_) {
+    // skip unreadable dirs
+  }
+  return total;
+}
+
+/**
+ * Check disk guardrails. Returns { allowed, diskUsageBytes, threshold, worktreeCount }.
+ * When hard-stop is enabled and threshold exceeded, `allowed` is false.
+ */
+function checkWorktreeDiskGuardrails(repoPaths) {
+  const threshold = CFG.worktreeDiskThresholdBytes;
+  const { diskUsageBytes, worktreeCount } = getWorktreeDiskUsage(repoPaths);
+  const exceeded = diskUsageBytes >= threshold;
+
+  if (exceeded) {
+    log("warn", "w4-disk-threshold-exceeded", {
+      disk_usage_bytes: diskUsageBytes,
+      threshold,
+      worktreeCount,
+      hardStop: CFG.worktreeDiskHardStop,
+    });
+  }
+
+  const allowed = !(exceeded && CFG.worktreeDiskHardStop);
+  _worktreeDiskBlocked = !allowed;
+
+  return { allowed, diskUsageBytes, threshold, worktreeCount };
+}
+
+/**
+ * Returns true if disk hard-stop is currently blocking new claims.
+ */
+function isWorktreeDiskBlocked() {
+  return _worktreeDiskBlocked;
+}
+
+// ── STAGE W5: OPERATOR UX + CONTROL SURFACE ─────────────────────────────────────
+// Inspect, list, force-cleanup, and Telegram-friendly formatting for worktrees.
+
+// Registry: tracks worktree metadata per taskId for operator queries.
+// Entries are added in processTask when a worktree is created, removed on cleanup.
+const _worktreeRegistry = new Map(); // taskId → { worktreePath, branch, baseRepoPath, slotId, createdAt }
+
+function worktreeRegistryAdd(taskId, info) {
+  _worktreeRegistry.set(taskId, {
+    worktreePath: info.worktreePath,
+    branch: info.branch,
+    baseRepoPath: info.baseRepoPath,
+    slotId: info.slotId || null,
+    createdAt: Date.now(),
+  });
+}
+
+function worktreeRegistryRemove(taskId) {
+  _worktreeRegistry.delete(taskId);
+}
+
+/**
+ * Inspect a worktree by taskId.
+ * Returns metadata: path, branch, age, active/idle, disk usage.
+ * Works for both active (in-registry) and completed (on-disk) worktrees.
+ */
+function inspectWorktree(taskId, repoPaths) {
+  const entry = _worktreeRegistry.get(taskId);
+  const isActive = _activeWorktreeTaskIds.has(taskId);
+
+  // Check registry first (active or recently active)
+  if (entry) {
+    const ageMs = Date.now() - entry.createdAt;
+    let diskUsageBytes = 0;
+    try {
+      if (fs.existsSync(entry.worktreePath)) {
+        diskUsageBytes = dirSizeSync(entry.worktreePath);
+      }
+    } catch (_) {}
+
+    return {
+      found: true,
+      taskId,
+      worktreePath: entry.worktreePath,
+      branch: entry.branch,
+      baseRepoPath: entry.baseRepoPath,
+      slotId: entry.slotId,
+      createdAt: entry.createdAt,
+      ageMs,
+      status: isActive ? "active" : "idle",
+      diskUsageBytes,
+    };
+  }
+
+  // Fall back to scanning .worktrees directories on disk
+  for (const repoPath of (repoPaths || [])) {
+    const wtDir = path.join(repoPath, WORKTREE_BASE_DIR, taskId);
+    if (fs.existsSync(wtDir)) {
+      let stat;
+      try { stat = fs.statSync(wtDir); } catch (_) { continue; }
+      const ageMs = Date.now() - stat.mtimeMs;
+      let diskUsageBytes = 0;
+      try { diskUsageBytes = dirSizeSync(wtDir); } catch (_) {}
+
+      // Try to detect branch from HEAD file
+      let branch = null;
+      try {
+        const headFile = path.join(wtDir, ".git");
+        if (fs.existsSync(headFile)) {
+          const headContent = fs.readFileSync(path.join(wtDir, ".git"), "utf-8").trim();
+          // .git file in worktree contains "gitdir: ..." pointing to main repo's worktree dir
+          // Try reading HEAD from the worktree
+          const gitDirMatch = headContent.match(/^gitdir:\s*(.+)$/);
+          if (gitDirMatch) {
+            const gitDir = gitDirMatch[1];
+            const headPath = path.join(gitDir, "HEAD");
+            if (fs.existsSync(headPath)) {
+              const ref = fs.readFileSync(headPath, "utf-8").trim();
+              const refMatch = ref.match(/^ref:\s*refs\/heads\/(.+)$/);
+              branch = refMatch ? refMatch[1] : ref.slice(0, 12);
+            }
+          }
+        }
+      } catch (_) {}
+
+      return {
+        found: true,
+        taskId,
+        worktreePath: wtDir,
+        branch,
+        baseRepoPath: repoPath,
+        slotId: null,
+        createdAt: stat.birthtimeMs || stat.mtimeMs,
+        ageMs,
+        status: isActive ? "active" : "stale",
+        diskUsageBytes,
+      };
+    }
+  }
+
+  return { found: false, taskId };
+}
+
+/**
+ * List all active slots and worktrees.
+ * Returns slot info + worktree registry + on-disk worktrees.
+ */
+function listWorktrees(repoPaths) {
+  const slots = [];
+  for (const [slotId, slotInfo] of _activeSlots.entries()) {
+    slots.push({
+      slotId,
+      taskId: slotInfo.taskId,
+      status: "active",
+    });
+  }
+
+  const registered = [];
+  for (const [taskId, entry] of _worktreeRegistry.entries()) {
+    registered.push({
+      taskId,
+      worktreePath: entry.worktreePath,
+      branch: entry.branch,
+      slotId: entry.slotId,
+      ageMs: Date.now() - entry.createdAt,
+      status: _activeWorktreeTaskIds.has(taskId) ? "active" : "idle",
+    });
+  }
+
+  // Also scan disk for orphaned worktrees not in registry
+  const onDisk = [];
+  for (const repoPath of (repoPaths || [])) {
+    const wtBase = path.join(repoPath, WORKTREE_BASE_DIR);
+    if (!fs.existsSync(wtBase)) continue;
+    try {
+      const entries = fs.readdirSync(wtBase, { withFileTypes: true });
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const taskId = entry.name;
+        if (_worktreeRegistry.has(taskId)) continue; // already in registered list
+        let stat;
+        try { stat = fs.statSync(path.join(wtBase, taskId)); } catch (_) { continue; }
+        onDisk.push({
+          taskId,
+          worktreePath: path.join(wtBase, taskId),
+          repoPath,
+          ageMs: Date.now() - stat.mtimeMs,
+          status: _activeWorktreeTaskIds.has(taskId) ? "active" : "stale",
+        });
+      }
+    } catch (_) {}
+  }
+
+  return {
+    activeSlots: slots,
+    totalSlots: CFG.maxParallelWorktrees,
+    registeredWorktrees: registered,
+    onDiskOrphans: onDisk,
+    diskUsage: getWorktreeDiskUsage(repoPaths || []),
+  };
+}
+
+/**
+ * Force cleanup a worktree by taskId.
+ * Default: denies cleanup if task is active. Pass force=true to override.
+ * Returns { success, denied, reason, warning }.
+ */
+function forceCleanupWorktree(taskId, repoPaths, { force = false } = {}) {
+  const isActive = _activeWorktreeTaskIds.has(taskId);
+
+  if (isActive && !force) {
+    log("warn", "w5-force-cleanup-denied", { taskId, reason: "task_active" });
+    return {
+      success: false,
+      denied: true,
+      reason: "task is currently active; use force=true to override",
+    };
+  }
+
+  let warning = null;
+  if (isActive && force) {
+    warning = "forced cleanup of active task — task may fail or produce partial results";
+    log("warn", "w5-force-cleanup-active-override", { taskId, warning });
+  }
+
+  // Find the worktree path
+  let wtPath = null;
+  let baseRepoPath = null;
+  const entry = _worktreeRegistry.get(taskId);
+  if (entry) {
+    wtPath = entry.worktreePath;
+    baseRepoPath = entry.baseRepoPath;
+  } else {
+    // Scan disk
+    for (const repoPath of (repoPaths || [])) {
+      const candidate = path.join(repoPath, WORKTREE_BASE_DIR, taskId);
+      if (fs.existsSync(candidate)) {
+        wtPath = candidate;
+        baseRepoPath = repoPath;
+        break;
+      }
+    }
+  }
+
+  if (!wtPath || !fs.existsSync(wtPath)) {
+    return {
+      success: false,
+      denied: false,
+      reason: "worktree not found on disk",
+    };
+  }
+
+  // Remove it
+  try {
+    fs.rmSync(wtPath, { recursive: true, force: true });
+    // Prune git worktree registry
+    try {
+      require("child_process").execSync("git worktree prune", {
+        cwd: baseRepoPath,
+        stdio: "ignore",
+        timeout: 10000,
+      });
+    } catch (_) {}
+  } catch (err) {
+    log("warn", "w5-force-cleanup-failed", { taskId, err: err.message });
+    return {
+      success: false,
+      denied: false,
+      reason: `cleanup failed: ${err.message}`,
+    };
+  }
+
+  // Clean up tracking state
+  _worktreeRegistry.delete(taskId);
+  _activeWorktreeTaskIds.delete(taskId);
+
+  log("info", "w5-force-cleanup-done", { taskId, wtPath, forced: isActive && force, warning });
+
+  return {
+    success: true,
+    denied: false,
+    reason: null,
+    warning,
+    cleanedPath: wtPath,
+  };
+}
+
+/**
+ * Format a compact Telegram-friendly status summary for a task event.
+ * Returns a short string suitable for bot messages.
+ */
+function formatTelegramStatus(eventData) {
+  const { taskId, status, phase, message, meta } = eventData;
+  const shortId = (taskId || "???").slice(-8);
+  const slot = meta?.slotId ? ` [${meta.slotId}]` : "";
+  const branch = meta?.worktreeBranch || meta?.branch || "";
+  const branchTag = branch ? ` \u2192 ${branch}` : "";
+
+  const statusIcons = {
+    claimed: "\u2705",
+    started: "\u25B6\uFE0F",
+    progress: "\u23F3",
+    completed: "\u2705",
+    review_pass: "\u2705",
+    review_fail: "\u274C",
+    needs_input: "\u2753",
+    needs_patch: "\uD83D\uDD27",
+    escalated: "\u26A0\uFE0F",
+    failed: "\u274C",
+    timeout: "\u23F0",
+    rejected: "\uD83D\uDEAB",
+  };
+  const icon = statusIcons[status] || "\u2139\uFE0F";
+
+  // Build compact summary
+  let summary = `${icon} ${shortId}${slot}${branchTag}\n`;
+  summary += `${status}/${phase}`;
+
+  if (message) {
+    const shortMsg = message.length > 120 ? message.slice(0, 117) + "..." : message;
+    summary += `: ${shortMsg}`;
+  }
+
+  // Add duration if available
+  if (meta?.durationMs) {
+    const secs = (meta.durationMs / 1000).toFixed(1);
+    summary += ` (${secs}s)`;
+  }
+
+  // Add slot utilization
+  if (meta?.activeSlots !== undefined && meta?.totalSlots !== undefined) {
+    summary += `\nslots: ${meta.activeSlots}/${meta.totalSlots}`;
+  }
+
+  // Add worktree info if present
+  if (meta?.worktreePath) {
+    summary += `\nwt: ${path.basename(meta.worktreePath)}`;
+  }
+
+  // Add disk usage for disk-related events
+  if (meta?.disk_usage_bytes !== undefined) {
+    const mb = (meta.disk_usage_bytes / (1024 * 1024)).toFixed(1);
+    summary += `\ndisk: ${mb}MB`;
+  }
+
+  return summary;
+}
+
+/**
+ * Build enriched event metadata for worktree-aware task notifications.
+ * Merges standard fields (taskId, slotId, worktreePath, branch, status phase)
+ * into the event meta object.
+ */
+function enrichEventMeta(task, slotCtx, worktreeInfo, baseMeta) {
+  const enriched = { ...baseMeta };
+  enriched.taskId = task.taskId;
+  enriched.slotId = slotCtx?.slotId || null;
+  if (worktreeInfo) {
+    enriched.worktreePath = worktreeInfo.worktreePath;
+    enriched.worktreeBranch = worktreeInfo.branch;
+    enriched.baseCommit = worktreeInfo.baseCommit;
+  }
+  return enriched;
+}
+
 // ── MAIN LOOP ──────────────────────────────────────────────────────────────────
 
 let shuttingDown = false;
@@ -1211,261 +2676,571 @@ function resetBackoff() {
   backoff = 0;
 }
 
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
-}
+// ── PROCESS TASK (single slot) ──────────────────────────────────────────────────
+// Extracted from mainLoop so it can be run concurrently in parallel slots.
+// `slotCtx` provides per-slot lease/nonce; for single-slot mode (maxParallelWorktrees=1)
+// it falls back to the global lease/nonce functions for full backward compat.
 
-async function mainLoop() {
-  log("info", "worker started", {
-    allowedRepos: CFG.allowedRepos,
-    pollIntervalMs: CFG.pollIntervalMs,
-  });
+async function processTask(task, slotCtx) {
+  let worktreeInfo = null;
+  let originalRepoPath = null;
 
-  while (!shuttingDown) {
-    let task = null;
-    try {
-      // ── PULL ──
-      const pullRes = await apiPost("/api/worker/pull", {
-        workerId: CFG.workerId,
+  try {
+    log("info", "task received", { taskId: task.taskId, mode: task.mode, slotId: slotCtx.slotId });
+
+    // Per-slot lease + nonce
+    slotResetNonce(slotCtx);
+    slotGetNonce(slotCtx, task.taskId);
+    slotStartLease(slotCtx, task.taskId);
+
+    await sendEvent(task, "claimed", "pull", "task received", getSlotTelemetry(slotCtx.slotId));
+
+    // ── RESUME CHECK ──
+    if (task.pendingAnswer) {
+      log("info", "task resumed with answer", {
+        taskId: task.taskId,
+        answer: task.pendingAnswer.slice(0, 200),
       });
+      await sendEvent(task, "progress", "report", "task resumed with user input");
+    }
 
-      resetBackoff();
+    // ── VALIDATE ──
+    await sendEvent(task, "started", "validate", "validating task");
+    const errors = validateTask(task);
+    if (errors.length) {
+      log("error", "task validation failed", { taskId: task.taskId, errors });
+      await sendEvent(task, "rejected", "validate", errors.join("; "));
+      await apiPost("/api/worker/result", {
+        workerId: CFG.workerId,
+        taskId: task.taskId,
+        status: "rejected",
+        mode: task.mode,
+        output: { stdout: "", stderr: errors.join("; "), truncated: false },
+        meta: { durationMs: 0, repoPath: task.scope?.repoPath, branch: task.scope?.branch, ...getSlotTelemetry(slotCtx.slotId) },
+      }).catch((e) => log("error", "failed to report rejection", { err: e.message }));
+      return;
+    }
 
-      if (!pullRes.ok) {
-        log("warn", "pull returned ok:false", { body: JSON.stringify(pullRes).slice(0, 300) });
-        await sleep(CFG.pollIntervalMs);
-        continue;
-      }
+    // ── PLAN + STEP TELEMETRY ──
+    const plan = buildPlan(task);
+    const stepTotal = plan.length;
+    const gitStep = (plan.findIndex((s) => s.startsWith("checkout")) + 1) || 2;
+    const claudeStep = (plan.findIndex((s) => s.startsWith("spawn claude")) + 1) || 3;
+    await sendEvent(task, "progress", "plan", `steps: ${plan.join(" → ")}`, {
+      stepIndex: 0,
+      stepTotal,
+      steps: plan,
+      ...getSlotTelemetry(slotCtx.slotId),
+    });
+    await sendEvent(task, "progress", "validate", "validation passed", {
+      stepIndex: 1,
+      stepTotal,
+    });
 
-      if (!pullRes.task) {
-        log("debug", "no tasks");
-        await sleep(CFG.pollIntervalMs);
-        continue;
-      }
-
-      task = pullRes.task;
-      log("info", "task received", { taskId: task.taskId, mode: task.mode });
-      await sendEvent(task, "claimed", "pull", "task received");
-
-      // ── RESUME CHECK ──
-      if (task.pendingAnswer) {
-        log("info", "task resumed with answer", {
+    // ── WORKTREE SETUP ──
+    originalRepoPath = task.scope?.repoPath;
+    if (task.useWorktree && task.scope && task.scope.repoPath) {
+      // W4: disk guardrail check before creating worktree
+      const diskCheck = checkWorktreeDiskGuardrails(CFG.allowedRepos);
+      if (!diskCheck.allowed) {
+        log("error", "w4-disk-hard-stop", {
           taskId: task.taskId,
-          answer: task.pendingAnswer.slice(0, 200),
+          disk_usage_bytes: diskCheck.diskUsageBytes,
+          threshold: diskCheck.threshold,
         });
-        await sendEvent(task, "progress", "report", "task resumed with user input");
-      }
-
-      // ── VALIDATE ──
-      await sendEvent(task, "started", "validate", "validating task");
-      const errors = validateTask(task);
-      if (errors.length) {
-        log("error", "task validation failed", { taskId: task.taskId, errors });
-        await sendEvent(task, "rejected", "validate", errors.join("; "));
+        await sendEvent(task, "failed", "worktree", "disk threshold exceeded — hard stop enabled", {
+          disk_usage_bytes: diskCheck.diskUsageBytes,
+          threshold: diskCheck.threshold,
+        });
         await apiPost("/api/worker/result", {
           workerId: CFG.workerId,
           taskId: task.taskId,
-          status: "rejected",
+          status: "failed",
           mode: task.mode,
-          output: { stdout: "", stderr: errors.join("; "), truncated: false },
-          meta: { durationMs: 0, repoPath: task.scope?.repoPath, branch: task.scope?.branch },
-        }).catch((e) => log("error", "failed to report rejection", { err: e.message }));
-        continue;
+          output: { stdout: "", stderr: "worktree disk threshold exceeded (hard stop)", truncated: false },
+          meta: { durationMs: 0, repoPath: task.scope.repoPath, branch: task.scope.branch, ...getSlotTelemetry(slotCtx.slotId) },
+        }).catch((e) => log("error", "failed to report disk hard-stop", { err: e.message }));
+        return;
       }
 
-      // ── PLAN + STEP TELEMETRY ──
-      const plan = buildPlan(task);
-      const stepTotal = plan.length;
-      const gitStep = (plan.findIndex((s) => s.startsWith("checkout")) + 1) || 2;
-      const claudeStep = (plan.findIndex((s) => s.startsWith("spawn claude")) + 1) || 3;
-      await sendEvent(task, "progress", "plan", `steps: ${plan.join(" → ")}`, {
-        stepIndex: 0,
-        stepTotal,
-        steps: plan,
-      });
-      await sendEvent(task, "progress", "validate", "validation passed", {
-        stepIndex: 1,
-        stepTotal,
-      });
+      // W4: track active worktree task
+      _activeWorktreeTaskIds.add(task.taskId);
 
-      // ── EXECUTE ──
-      const result = task.orchestratedLoop
-        ? await runOrchestratedLoop(task, { gitStep, claudeStep, stepTotal })
-        : (task.reviewLoop && task.mode === "review")
-          ? await runReviewLoop(task, { gitStep, claudeStep, stepTotal })
-          : await executeTask(task, { gitStep, claudeStep, stepTotal });
-
-      // ── NEEDS_INPUT CHECK ──
-      // Only structured asks (explicit [NEEDS_INPUT] marker with question field,
-      // or AskUserQuestion tool) can trigger needs_input. Heuristics removed.
-      let ni = null;
-      if (result.status === "completed") {
-        ni = parseNeedsInput(result.output.stdout);
-
-        // Debug: pre-decision introspection
-        if (CFG.needsInputDebug) {
-          const _hasPd = result.output.stdout.includes('"permission_denials"');
-          const _hasAuq = result.output.stdout.includes('"AskUserQuestion"');
-          log("debug", "[ni] pre-decision", {
-            taskId: task.taskId,
-            exitCode: result.meta.exitCode,
-            hasPermissionDenials: _hasPd,
-            hasAskUserQuestion: _hasAuq,
-            parseNeedsInputFound: ni !== null,
-            sourceType: ni?.sourceType || null,
-            isStructuredAsk: ni?.isStructuredAsk || false,
-            questionPreview: ni ? (ni.question || "").slice(0, 80) : null,
-          });
-        }
-
-        if (ni && ni.isStructuredAsk && ni.question) {
-          result.status = "needs_input";
-          result.meta.question = ni.question;
-          result.meta.options = ni.options;
-          result.meta.context = ni.context;
-          result.meta.needsInputAt = new Date().toISOString();
-          log("info", "needs_input detected", {
-            taskId: task.taskId,
-            sourceType: ni.sourceType,
-            isStructuredAsk: ni.isStructuredAsk,
-            hasOptions: !!(ni.options && ni.options.length),
-            questionPreview: (ni.question || "").slice(0, 100),
-          });
-        } else if (ni) {
-          log("info", "needs_input candidate rejected: not a structured ask", {
-            taskId: task.taskId,
-            sourceType: ni.sourceType,
-            isStructuredAsk: false,
-          });
-          ni = null; // clear so downstream gates don't fire
-        }
-      }
-
-      // ── REVIEW GATE ──
-      // For review mode, completed is never valid — must be review_pass or review_fail.
-      // reviewLoop and orchestratedLoop tasks have already been handled above.
-      if (task.mode === "review" && !task.reviewLoop && !task.orchestratedLoop && result.status === "completed") {
-        const rv = parseReviewVerdict(result.output.stdout);
-        result.meta.reviewVerdict = rv.verdict;
-        if (rv.verdict === "pass") {
-          result.status = "review_pass";
-        } else {
-          result.status = "review_fail";
-          result.meta.reviewSeverity = rv.severity;
-          result.meta.reviewFindings = rv.findings;
-          result.meta.structuredFindings = rv.structuredFindings || null;
-        }
-        log("info", "review verdict parsed", {
-          taskId: task.taskId,
-          verdict: rv.verdict,
-          severity: rv.severity || null,
+      const baseRepo = path.resolve(task.scope.repoPath);
+      try {
+        const baseCommit = await gitGetBaseCommit(baseRepo);
+        const wtPath = await createWorktree(baseRepo, task.taskId, task.scope.branch);
+        worktreeInfo = {
+          worktreePath: wtPath,
+          branch: task.scope.branch,
+          baseCommit,
+          baseRepoPath: baseRepo,
+        };
+        // Override repoPath so executeTask runs inside the worktree
+        task.scope.repoPath = wtPath;
+        // W5: register worktree for operator inspection
+        worktreeRegistryAdd(task.taskId, {
+          worktreePath: wtPath,
+          branch: task.scope.branch,
+          baseRepoPath: baseRepo,
+          slotId: slotCtx.slotId,
         });
-      }
-
-      // Hard safety gate: if review mode (non-loop) still shows completed (should never happen),
-      // force review_fail. Completion is impossible without an explicit REVIEW_PASS marker.
-      if (task.mode === "review" && !task.reviewLoop && !task.orchestratedLoop && result.status === "completed") {
-        log("error", "review-gate violation: completed status blocked for review mode", {
-          taskId: task.taskId,
+        log("info", "worktree created", { taskId: task.taskId, wtPath, baseCommit, branch: task.scope.branch, slotId: slotCtx.slotId });
+        await sendEvent(task, "progress", "worktree", `worktree created at ${wtPath}`, {
+          worktreePath: wtPath,
+          baseCommit,
+          branch: task.scope.branch,
+          ...getSlotTelemetry(slotCtx.slotId),
         });
-        result.status = "review_fail";
-        result.meta.reviewVerdict = "fail";
-        result.meta.reviewSeverity = "unknown";
-        result.meta.reviewFindings = "Review gate enforced: completed status not allowed for review mode tasks.";
+      } catch (wtErr) {
+        log("error", "worktree creation failed", { taskId: task.taskId, err: wtErr.message });
+        await sendEvent(task, "failed", "worktree", `worktree creation failed: ${wtErr.message}`);
+        await apiPost("/api/worker/result", {
+          workerId: CFG.workerId,
+          taskId: task.taskId,
+          status: "failed",
+          mode: task.mode,
+          output: { stdout: "", stderr: `worktree creation failed: ${wtErr.message}`, truncated: false },
+          meta: { durationMs: 0, repoPath: baseRepo, branch: task.scope.branch, ...getSlotTelemetry(slotCtx.slotId) },
+        }).catch((e) => log("error", "failed to report worktree failure", { err: e.message }));
+        return;
       }
+    }
 
-      log("info", "task done", {
+    // ── EXECUTE ──
+    const stepCtxMain = { gitStep, claudeStep, stepTotal };
+    let result;
+    if (task.orchestratedLoop) {
+      result = await runOrchestratedLoop(task, stepCtxMain);
+    } else if (task.reviewLoop && task.mode === "review") {
+      result = await runReviewLoop(task, stepCtxMain);
+    } else if (task.isolatedReview && task.mode === "review") {
+      result = await executeIsolatedReview(task, stepCtxMain);
+    } else {
+      result = await executeTask(task, stepCtxMain);
+    }
+
+    // Attach worktree metadata to result
+    if (worktreeInfo) {
+      result.meta.worktreePath = worktreeInfo.worktreePath;
+      result.meta.baseCommit = worktreeInfo.baseCommit;
+      result.meta.worktreeBranch = worktreeInfo.branch;
+    }
+
+    // Attach slot telemetry to result
+    Object.assign(result.meta, getSlotTelemetry(slotCtx.slotId));
+
+    // ── LEASE CHECK (Stage 5) ──
+    if (slotIsLeaseExpired(slotCtx)) {
+      log("warn", "lease-expired-abort", {
         taskId: task.taskId,
         status: result.status,
-        durationMs: result.meta.durationMs,
+        slotId: slotCtx.slotId,
+        msg: "lease expired during execution; skipping result report",
       });
+      await sendEvent(task, "failed", "lease", "lease expired during execution — result discarded");
+      slotStopLease(slotCtx);
+      slotResetNonce(slotCtx);
+      resetExecutionNonce(task.taskId);
+      return;
+    }
 
-      if (result.status === "needs_input" && ni && ni.isStructuredAsk && ni.question) {
-        await sendEvent(
-          task, "needs_input", "claude",
-          `needs input: ${result.meta.question || "(no question)"}`,
-          result.meta
-        );
-      } else if (result.status === "needs_input") {
-        // Defense-in-depth: status was set to needs_input but structured ask
-        // validation failed at the event gate. Demote to completed to prevent
-        // false notifications reaching Telegram/orchestrator.
-        log("error", "needs_input event gate blocked: status was needs_input but ni guard failed", {
+    // ── NEEDS_INPUT CHECK ──
+    let ni = null;
+    if (result.status === "completed") {
+      ni = parseNeedsInput(result.output.stdout);
+
+      if (CFG.needsInputDebug) {
+        const _hasPd = result.output.stdout.includes('"permission_denials"');
+        const _hasAuq = result.output.stdout.includes('"AskUserQuestion"');
+        log("debug", "[ni] pre-decision", {
           taskId: task.taskId,
-          niPresent: !!ni,
+          exitCode: result.meta.exitCode,
+          hasPermissionDenials: _hasPd,
+          hasAskUserQuestion: _hasAuq,
+          parseNeedsInputFound: ni !== null,
+          sourceType: ni?.sourceType || null,
           isStructuredAsk: ni?.isStructuredAsk || false,
-          question: ni?.question || null,
+          questionPreview: ni ? (ni.question || "").slice(0, 80) : null,
         });
-        result.status = "completed";
-        await sendEvent(task, "completed", "report", "task completed", result.meta);
-      } else if (result.status === "review_pass") {
-        const iterInfo = result.meta.reviewIteration
-          ? ` (iter ${result.meta.reviewIteration}/${result.meta.reviewMaxIterations})`
-          : "";
-        await sendEvent(task, "review_pass", "report", `review passed${iterInfo}`, result.meta);
-      } else if (result.status === "review_fail") {
-        const sev = result.meta.reviewSeverity || "unknown";
-        const summary = (result.meta.reviewFindings || "").slice(0, 200);
-        await sendEvent(task, "review_fail", "report", `review failed (${sev}): ${summary}`, result.meta);
-      } else if (result.status === "escalated") {
-        const iter = result.meta.reviewIteration || "?";
-        const maxIter = result.meta.reviewMaxIterations || "?";
-        const reason = result.meta.escalationReason || "max iterations reached";
-        await sendEvent(task, "escalated", "report",
-          `review loop escalated after ${iter}/${maxIter} iterations: ${reason}`,
-          result.meta
-        );
-      } else if (result.status === "completed") {
-        await sendEvent(task, "completed", "report", "task completed", result.meta);
-      } else if (result.status === "timeout") {
-        await sendEvent(task, "timeout", "claude", "claude process timed out", result.meta);
+      }
+
+      if (ni && ni.isStructuredAsk && ni.question) {
+        result.status = "needs_input";
+        result.meta.question = ni.question;
+        result.meta.options = ni.options;
+        result.meta.context = ni.context;
+        result.meta.needsInputAt = new Date().toISOString();
+        log("info", "needs_input detected", {
+          taskId: task.taskId,
+          sourceType: ni.sourceType,
+          isStructuredAsk: ni.isStructuredAsk,
+          hasOptions: !!(ni.options && ni.options.length),
+          questionPreview: (ni.question || "").slice(0, 100),
+        });
+      } else if (ni) {
+        log("info", "needs_input candidate rejected: not a structured ask", {
+          taskId: task.taskId,
+          sourceType: ni.sourceType,
+          isStructuredAsk: false,
+        });
+        ni = null;
+      }
+    }
+
+    // ── REVIEW GATE ──
+    if (task.mode === "review" && !task.reviewLoop && !task.orchestratedLoop && result.status === "completed") {
+      const rv = parseReviewVerdict(result.output.stdout);
+      result.meta.reviewVerdict = rv.verdict;
+      if (rv.verdict === "pass") {
+        result.status = "review_pass";
       } else {
-        await sendEvent(task, "failed", "report", "task failed", result.meta);
+        result.status = "review_fail";
+        result.meta.reviewSeverity = rv.severity;
+        result.meta.reviewFindings = rv.findings;
+        result.meta.structuredFindings = rv.structuredFindings || null;
       }
-
-      // ── REPORT ──
-      await sendEvent(task, "progress", "report", "reporting result", {
-        stepIndex: stepTotal,
-        stepTotal,
-      });
-      // Build v2 result: persist artifacts + truncate inline output
-      const v2 = buildV2Output(task.taskId, result.output);
-      const resultBody = {
-        resultVersion: 2,
-        workerId: CFG.workerId,
+      log("info", "review verdict parsed", {
         taskId: task.taskId,
-        status: result.status,
-        mode: task.mode,
-        output: v2.output,
-        artifacts: v2.artifacts,
-        meta: result.meta,
-      };
-      // For needs_input: hoist question/options/context to top-level so the
-      // orchestrator can store them directly on task.question / task.options
-      // without having to dig into meta. meta fields are preserved for compat.
-      if (result.status === "needs_input" && ni && ni.isStructuredAsk) {
-        resultBody.question = result.meta.question ?? null;
-        resultBody.options = result.meta.options ?? null;
-        resultBody.context = result.meta.context ?? null;
-        resultBody.needsInputAt = result.meta.needsInputAt ?? null;
-      }
-      // For review_fail and escalated: hoist structuredFindings to top-level so the
-      // orchestrator can pass them directly to the next patch task.
-      if (result.status === "review_fail" || result.status === "escalated") {
-        resultBody.structuredFindings = result.meta?.structuredFindings ?? null;
-        resultBody.reviewFindings = result.meta?.reviewFindings ?? null;
-      }
-      await apiPost("/api/worker/result", resultBody);
+        verdict: rv.verdict,
+        severity: rv.severity || null,
+      });
+    }
 
+    // Hard safety gate
+    if (task.mode === "review" && !task.reviewLoop && !task.orchestratedLoop && result.status === "completed") {
+      log("error", "review-gate violation: completed status blocked for review mode", {
+        taskId: task.taskId,
+      });
+      result.status = "review_fail";
+      result.meta.reviewVerdict = "fail";
+      result.meta.reviewSeverity = "unknown";
+      result.meta.reviewFindings = "Review gate enforced: completed status not allowed for review mode tasks.";
+    }
+
+    // ── HARD REVIEW GATE (Stage 2) ──
+    enforceReviewGate(task, result);
+    if (result.meta.reviewGateEnforced) {
+      await sendEvent(task, result.status, "review_gate",
+        `review gate enforced: ${result.meta.reviewGateReason}`,
+        { reviewGateEnforced: true, reviewGateReason: result.meta.reviewGateReason }
+      );
+    }
+
+    // ── MERGE SAFETY GATE (Stage W3) ──
+    evaluateMergeGate(task, result);
+    await applyMergeConflictCheck(task, result, worktreeInfo);
+    if (result.meta.mergeGateBlocked) {
+      await sendEvent(task, result.status, "merge_gate",
+        `merge gate blocked: ${result.meta.gate_blocked_reason}`,
+        {
+          mergeGateBlocked: true,
+          gate_blocked_reason: result.meta.gate_blocked_reason,
+          mergeGateFailures: result.meta.mergeGateFailures || [],
+          mergeConflictCheck: result.meta.mergeConflictCheck || null,
+        }
+      );
+    }
+
+    // ── REPORT CONTRACT GUARDRAIL ──
+    if (result.status === "completed") {
+      const violation = validateReportContract(result.output.stdout, task);
+      if (violation) {
+        log("warn", "report_contract_violation", {
+          taskId: task.taskId,
+          reason: violation.reason,
+          length: violation.length,
+          pattern: violation.pattern,
+        });
+        await sendEvent(task, "report_contract_invalid", "report_contract",
+          violation.message,
+          { reason: violation.reason, length: violation.length, pattern: violation.pattern }
+        );
+
+        let retried = false;
+        if (CFG.reportRetryEnabled && task.reportRetryOnViolation !== false) {
+          log("info", "report_contract_retry", { taskId: task.taskId });
+          await sendEvent(task, "report_retry_attempt", "report_contract",
+            "Retrying task in report-only mode after contract violation",
+            { originalReason: violation.reason }
+          );
+          const retryTask = {
+            ...task,
+            _isolatedPrompt: buildPrompt(task) +
+              "\n\nIMPORTANT: Your previous response was rejected because it was empty or a trivial acknowledgement. " +
+              "You MUST provide a detailed, substantive report of your work including what was done, what changed, and the outcome.",
+          };
+          const retryResult = await executeTask(retryTask, stepCtxMain);
+          const retryViolation = validateReportContract(retryResult.output.stdout, task);
+          if (!retryViolation) {
+            log("info", "report_contract_retry_success", { taskId: task.taskId });
+            result = retryResult;
+            retried = true;
+          } else {
+            log("warn", "report_contract_retry_failed", {
+              taskId: task.taskId,
+              retryReason: retryViolation.reason,
+            });
+          }
+        }
+
+        if (!retried) {
+          result.status = "failed";
+          result.meta.failureReason = "report_contract_violation";
+          result.meta.reportContractViolation = violation;
+        }
+      }
+    }
+
+    log("info", "task done", {
+      taskId: task.taskId,
+      status: result.status,
+      durationMs: result.meta.durationMs,
+      slotId: slotCtx.slotId,
+      reviewGateEnforced: result.meta.reviewGateEnforced || false,
+    });
+
+    if (result.status === "needs_input" && ni && ni.isStructuredAsk && ni.question) {
+      await sendEvent(
+        task, "needs_input", "claude",
+        `needs input: ${result.meta.question || "(no question)"}`,
+        result.meta
+      );
+    } else if (result.status === "needs_input") {
+      log("error", "needs_input event gate blocked: status was needs_input but ni guard failed", {
+        taskId: task.taskId,
+        niPresent: !!ni,
+        isStructuredAsk: ni?.isStructuredAsk || false,
+        question: ni?.question || null,
+      });
+      result.status = "completed";
+      await sendEvent(task, "completed", "report", "task completed", result.meta);
+    } else if (result.status === "review_pass") {
+      const iterInfo = result.meta.reviewIteration
+        ? ` (iter ${result.meta.reviewIteration}/${result.meta.reviewMaxIterations})`
+        : "";
+      await sendEvent(task, "review_pass", "report", `review passed${iterInfo}`, result.meta);
+    } else if (result.status === "review_fail") {
+      const sev = result.meta.reviewSeverity || "unknown";
+      const summary = (result.meta.reviewFindings || "").slice(0, 200);
+      await sendEvent(task, "review_fail", "report", `review failed (${sev}): ${summary}`, result.meta);
+    } else if (result.status === "needs_patch") {
+      const reason = result.meta.gate_blocked_reason || "merge gate blocked";
+      await sendEvent(task, "needs_patch", "merge_gate",
+        `needs patch: ${reason}`,
+        result.meta
+      );
+    } else if (result.status === "escalated") {
+      const iter = result.meta.reviewIteration || "?";
+      const maxIter = result.meta.reviewMaxIterations || "?";
+      const reason = result.meta.escalationReason || "max iterations reached";
+      await sendEvent(task, "escalated", "report",
+        `review loop escalated after ${iter}/${maxIter} iterations: ${reason}`,
+        result.meta
+      );
+    } else if (result.status === "completed") {
+      await sendEvent(task, "completed", "report", "task completed", result.meta);
+    } else if (result.status === "timeout") {
+      await sendEvent(task, "timeout", "claude", "claude process timed out", result.meta);
+    } else {
+      await sendEvent(task, "failed", "report", "task failed", result.meta);
+    }
+
+    // ── REPORT ──
+    await sendEvent(task, "progress", "report", "reporting result", {
+      stepIndex: stepTotal,
+      stepTotal,
+      ...getSlotTelemetry(slotCtx.slotId),
+    });
+    const v2 = buildV2Output(task.taskId, result.output);
+    const resultBody = {
+      resultVersion: 2,
+      workerId: CFG.workerId,
+      taskId: task.taskId,
+      status: result.status,
+      mode: task.mode,
+      output: v2.output,
+      artifacts: v2.artifacts,
+      meta: result.meta,
+    };
+    if (result.status === "needs_input" && ni && ni.isStructuredAsk) {
+      resultBody.question = result.meta.question ?? null;
+      resultBody.options = result.meta.options ?? null;
+      resultBody.context = result.meta.context ?? null;
+      resultBody.needsInputAt = result.meta.needsInputAt ?? null;
+    }
+    if (result.status === "review_fail" || result.status === "escalated") {
+      resultBody.structuredFindings = result.meta?.structuredFindings ?? null;
+      resultBody.reviewFindings = result.meta?.reviewFindings ?? null;
+    }
+    if (result.meta.mergeGateBlocked) {
+      resultBody.gate_blocked_reason = result.meta.gate_blocked_reason ?? null;
+      resultBody.mergeGateFailures = result.meta.mergeGateFailures ?? null;
+      resultBody.mergeConflictCheck = result.meta.mergeConflictCheck ?? null;
+    }
+    await apiPost("/api/worker/result", resultBody);
+
+    // ── WORKTREE CLEANUP ──
+    if (worktreeInfo && !task.keepWorktree) {
+      task.scope.repoPath = originalRepoPath;
+      await removeWorktree(worktreeInfo.baseRepoPath, task.taskId);
+      worktreeRegistryRemove(task.taskId); // W5
+      log("info", "worktree removed", { taskId: task.taskId, wtPath: worktreeInfo.worktreePath });
+    } else if (worktreeInfo && task.keepWorktree) {
+      log("info", "worktree kept (keepWorktree=true)", { taskId: task.taskId, wtPath: worktreeInfo.worktreePath });
+    }
+    // W4: untrack active worktree
+    _activeWorktreeTaskIds.delete(task.taskId);
+
+    // Clean up slot lease + nonce + transient retry tracking
+    slotStopLease(slotCtx);
+    slotResetNonce(slotCtx);
+    resetExecutionNonce(task.taskId);
+    clearTransientFailures(task.taskId);
+
+    resetBackoff();
+  } catch (err) {
+    // Worktree cleanup on error
+    if (worktreeInfo && !task?.keepWorktree) {
+      try { if (originalRepoPath) task.scope.repoPath = originalRepoPath; } catch (_) {}
+      await removeWorktree(worktreeInfo.baseRepoPath, task.taskId).catch((wtErr) =>
+        log("warn", "worktree cleanup failed in error handler", { err: wtErr.message })
+      );
+      if (task?.taskId) worktreeRegistryRemove(task.taskId); // W5
+    }
+    // W4: untrack active worktree
+    if (task?.taskId) _activeWorktreeTaskIds.delete(task.taskId);
+
+    slotStopLease(slotCtx);
+    slotResetNonce(slotCtx);
+    if (task?.taskId) resetExecutionNonce(task.taskId);
+
+    const delay = nextBackoff();
+    log("error", "slot error", { err: err.message, slotId: slotCtx.slotId, taskId: task?.taskId, nextRetryMs: delay });
+
+    if (task && !isTransientError(err)) {
+      // Fatal (non-transient) error → DLQ immediately
+      log("error", "fatal-error-dlq", { taskId: task.taskId, err: err.message });
+      await sendToDeadLetter(task, err, 0, "fatal error in slot");
+      await sendEvent(task, "failed", "dlq", `dead-lettered: ${err.message}`);
+      clearTransientFailures(task.taskId);
+    } else if (task && isTransientError(err)) {
+      // Transient error → track and escalate to DLQ when retries exhausted
+      const failCount = recordTransientFailure(task.taskId);
+      log("warn", "transient-failure-recorded", {
+        taskId: task.taskId,
+        failCount,
+        maxRetries: CFG.maxRetries,
+        err: err.message,
+      });
+      if (failCount >= CFG.maxRetries) {
+        log("error", "transient-retries-exhausted-dlq", {
+          taskId: task.taskId,
+          failCount,
+          maxRetries: CFG.maxRetries,
+        });
+        await sendToDeadLetter(task, err, failCount, "transient retries exhausted in slot");
+        await sendEvent(task, "failed", "dlq", `dead-lettered: transient retries exhausted (${failCount}/${CFG.maxRetries}): ${err.message}`);
+        clearTransientFailures(task.taskId);
+      } else {
+        await sendEvent(task, "failed", "transient", `transient error (${failCount}/${CFG.maxRetries}): ${err.message}`);
+      }
+    }
+  }
+}
+
+// ── SCHEDULER (Stage W2) ────────────────────────────────────────────────────────
+// Polls for tasks and dispatches them to free slots. Each slot runs processTask()
+// concurrently. When maxParallelWorktrees=1, behavior is identical to pre-W2
+// sequential mainLoop.
+
+async function mainLoop() {
+  const totalSlots = CFG.maxParallelWorktrees;
+  log("info", "worker started", {
+    allowedRepos: CFG.allowedRepos,
+    pollIntervalMs: CFG.pollIntervalMs,
+    maxParallelWorktrees: totalSlots,
+  });
+
+  // W4: crash recovery on startup
+  if (CFG.allowedRepos.length > 0) {
+    try {
+      const recovery = worktreeStartupRecovery(CFG.allowedRepos);
+      if (recovery.recoveredCount > 0 || recovery.skippedUncertainCount > 0) {
+        log("info", "w4-startup-recovery-complete", recovery);
+      }
+    } catch (err) {
+      log("warn", "w4-startup-recovery-error", { err: err.message });
+    }
+  }
+
+  // W4: start periodic TTL cleanup
+  startWorktreeCleanupTimer();
+
+  while (!shuttingDown) {
+    // If all slots busy, wait for any to finish
+    if (_activeSlots.size >= totalSlots) {
+      await Promise.race([..._activeSlots.values()].map((s) => s.promise));
+      continue; // re-check after a slot frees up
+    }
+
+    // ── PULL ──
+    let pullRes;
+    try {
+      pullRes = await apiPost("/api/worker/pull", {
+        workerId: CFG.workerId,
+        availableSlots: totalSlots - _activeSlots.size,
+      });
       resetBackoff();
     } catch (err) {
       const delay = nextBackoff();
-      log("error", "loop error", { err: err.message, nextRetryMs: delay });
-      if (task) {
-        await sendEvent(task, "failed", "other", err.message);
-      }
+      log("error", "pull error", { err: err.message, nextRetryMs: delay });
       await sleep(delay);
+      continue;
     }
+
+    if (!pullRes.ok) {
+      log("warn", "pull returned ok:false", { body: JSON.stringify(pullRes).slice(0, 300) });
+      await sleep(CFG.pollIntervalMs);
+      continue;
+    }
+
+    if (!pullRes.task) {
+      log("debug", "no tasks", { activeSlots: _activeSlots.size, totalSlots });
+      // If slots are busy, race on them finishing vs poll interval
+      if (_activeSlots.size > 0) {
+        await Promise.race([
+          sleep(CFG.pollIntervalMs),
+          ...[..._activeSlots.values()].map((s) => s.promise),
+        ]);
+      } else {
+        await sleep(CFG.pollIntervalMs);
+      }
+      continue;
+    }
+
+    const task = pullRes.task;
+    const slotId = `slot-${task.taskId}`;
+    const slotCtx = createSlotContext(slotId);
+
+    // Launch task in a slot
+    const slotPromise = processTask(task, slotCtx).finally(() => {
+      _activeSlots.delete(slotId);
+      log("debug", "slot freed", { slotId, activeSlots: _activeSlots.size, totalSlots });
+    });
+
+    _activeSlots.set(slotId, { taskId: task.taskId, promise: slotPromise });
+    log("info", "slot assigned", { slotId, taskId: task.taskId, activeSlots: _activeSlots.size, totalSlots });
+  }
+
+  // ── GRACEFUL SHUTDOWN: drain in-flight tasks ──
+  if (_activeSlots.size > 0) {
+    log("info", "graceful-shutdown: waiting for in-flight tasks", {
+      activeSlots: _activeSlots.size,
+      taskIds: [..._activeSlots.values()].map((s) => s.taskId),
+    });
+    await Promise.allSettled([..._activeSlots.values()].map((s) => s.promise));
+    log("info", "graceful-shutdown: all slots drained");
   }
 
   log("info", "worker stopped");
@@ -1476,6 +3251,7 @@ async function mainLoop() {
 function shutdown(signal) {
   log("info", `received ${signal}, shutting down`);
   shuttingDown = true;
+  stopWorktreeCleanupTimer();
 }
 
 process.on("SIGINT", () => shutdown("SIGINT"));

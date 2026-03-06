@@ -25,6 +25,7 @@ const tasks: Task[] = [
   makeTask({ id: 'task-003-api', status: 'review_pass', message: 'API review', branch: 'feature/api' }),
   makeTask({ id: 'task-004-ui', status: 'completed', message: 'UI fixes', branch: 'feature/ui' }),
   makeTask({ id: 'task-005-perf', status: 'failed', message: 'Performance tuning', branch: 'feature/perf' }),
+  makeTask({ id: 'task-006-risk', status: 'at_risk', internalStatus: 'risk', message: 'Slow deploy', branch: 'feature/deploy' }),
 ]
 
 describe('filterByStatus', () => {
@@ -36,6 +37,12 @@ describe('filterByStatus', () => {
     const result = filterByStatus(tasks, 'running')
     expect(result).toHaveLength(1)
     expect(result[0].id).toBe('task-001-auth')
+  })
+
+  it('filters at_risk tasks', () => {
+    const result = filterByStatus(tasks, 'at_risk')
+    expect(result).toHaveLength(1)
+    expect(result[0].id).toBe('task-006-risk')
   })
 
   it('returns empty when no match', () => {

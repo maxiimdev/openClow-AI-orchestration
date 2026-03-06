@@ -46,7 +46,7 @@ function ensureRepo(dir) {
  * Spin up a mock orchestrator, spawn the worker, run one task, collect events,
  * then shut down. Returns collected events.
  */
-function runScenario({ port, task, workerEnv, afterResultMs = 600 }) {
+function runScenario({ task, workerEnv, afterResultMs = 600 }) {
   return new Promise((resolve, reject) => {
     const events = [];
     let pullCount = 0;
@@ -98,7 +98,8 @@ function runScenario({ port, task, workerEnv, afterResultMs = 600 }) {
 
     server.on("error", reject);
 
-    server.listen(port, () => {
+    server.listen(0, () => {
+      const port = server.address().port;
       worker = spawn("node", ["worker.js"], {
         cwd: path.join(__dirname),
         env: {
@@ -107,6 +108,7 @@ function runScenario({ port, task, workerEnv, afterResultMs = 600 }) {
           WORKER_TOKEN:    "test-token",
           WORKER_ID:       `test-worker-${port}`,
           POLL_INTERVAL_MS: "300",
+          MAX_PARALLEL_WORKTREES: "1",
           CLAUDE_BYPASS_PERMISSIONS: "false",
           ...workerEnv,
         },
@@ -133,7 +135,6 @@ async function testDryRunStepProgression() {
   console.log("\n=== Test 1: dry_run step progression ===");
 
   const { events, resultPayload } = await runScenario({
-    port: 9878,
     task: {
       taskId:       "telem-001",
       mode:         "dry_run",
@@ -184,7 +185,6 @@ async function testHeartbeat() {
 
   // Mock claude sleeps 800 ms; heartbeat fires every 300 ms → expect ≥1 keepalive
   const { events } = await runScenario({
-    port: 9879,
     task: {
       taskId:       "telem-002",
       mode:         "implement",
@@ -225,7 +225,6 @@ async function testNearTimeoutRisk() {
   // CLAUDE_TIMEOUT_MS=2000 → nearTimeoutMs=1600
   // Mock claude sleeps 1800 ms: risk fires at 1600, claude finishes at 1800, no actual timeout.
   const { events } = await runScenario({
-    port: 9880,
     task: {
       taskId:       "telem-003",
       mode:         "implement",

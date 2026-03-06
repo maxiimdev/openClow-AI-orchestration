@@ -26,8 +26,6 @@ const path = require("path");
 const os = require("os");
 const { spawn, execSync } = require("child_process");
 
-const PORT = 9879;
-
 // ── Mock repo + mock claude ───────────────────────────────────────────────────
 
 const mockClaudeDir = fs.mkdtempSync(path.join(os.tmpdir(), "mock-claude-rg-"));
@@ -157,9 +155,7 @@ const server = http.createServer((req, res) => {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true }));
 
-      if (pullCount >= PULL_SEQUENCE.length + 1) {
-        setTimeout(() => finish(), 1500);
-      }
+      // finish triggered by result count, not by timer
       return;
     }
 
@@ -191,6 +187,9 @@ const server = http.createServer((req, res) => {
       }
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true }));
+      if (receivedResults.length >= PULL_SEQUENCE.length) {
+        process.nextTick(() => finish());
+      }
       return;
     }
 
@@ -201,7 +200,10 @@ const server = http.createServer((req, res) => {
 
 // ── Finish + assertions ───────────────────────────────────────────────────────
 
+let _finished = false;
 function finish() {
+  if (_finished) return;
+  _finished = true;
   console.log(color(36, "\n" + "=".repeat(60)));
   console.log(color(36, "TEST RESULTS — Stage 2 Review Gate"));
   console.log(color(36, "=".repeat(60)));
@@ -344,7 +346,8 @@ function finish() {
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 
-server.listen(PORT, () => {
+server.listen(0, () => {
+  const PORT = server.address().port;
   console.log(color(36, `[orch] mock orchestrator on http://localhost:${PORT}`));
   console.log(color(36, `[orch] mock claude: ${mockClaudePath}`));
   console.log(color(36, `[orch] mock repo:   ${mockRepoDir}`));
@@ -358,6 +361,7 @@ server.listen(PORT, () => {
       WORKER_TOKEN: "test-token",
       WORKER_ID: "test-worker-rg",
       POLL_INTERVAL_MS: "1000",
+      MAX_PARALLEL_WORKTREES: "1",
       CLAUDE_CMD: mockClaudePath,
       ALLOWED_REPOS: mockRepoDir,
       CLAUDE_TIMEOUT_MS: "30000",
