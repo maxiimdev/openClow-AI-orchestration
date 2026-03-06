@@ -16,6 +16,7 @@ export default defineConfig({
   use: {
     baseURL: 'http://localhost:3000',
     screenshot: 'on',
+    trace: 'retain-on-failure',
     viewport: { width: 390, height: 844 },
   },
   projects: [
