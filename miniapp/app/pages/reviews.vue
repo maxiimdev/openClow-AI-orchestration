@@ -18,6 +18,16 @@ const severityClass: Record<string, string> = {
   major: 'bg-severity-major-muted text-severity-major-foreground',
   minor: 'bg-severity-minor-muted text-severity-minor-foreground',
 }
+
+const findingsByTask = computed(() => {
+  const map: Record<string, Record<string, number>> = {}
+  for (const task of reviewTasks.value) {
+    if (task.structuredFindings?.length) {
+      map[task.id] = countFindingsBySeverity(task.structuredFindings)
+    }
+  }
+  return map
+})
 </script>
 
 <template>
@@ -55,7 +65,7 @@ const severityClass: Record<string, string> = {
         <NuxtLink
           v-for="task in reviewTasks" :key="task.id"
           :to="`/tasks/${task.id}`"
-          class="block rounded-lg border p-4 hover:bg-accent transition-colors"
+          class="block rounded-lg border p-4 hover:bg-accent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         >
           <div class="flex items-center justify-between">
             <span class="font-mono text-sm text-muted-foreground">{{ truncateId(task.id) }}</span>
@@ -70,8 +80,8 @@ const severityClass: Record<string, string> = {
           <p class="mt-2 text-sm text-muted-foreground">{{ getReviewCardSummary(task) }}</p>
 
           <!-- Severity breakdown for tasks with structured findings -->
-          <div v-if="task.structuredFindings?.length" class="mt-2 flex gap-1.5">
-            <template v-for="(count, sev) in countFindingsBySeverity(task.structuredFindings)" :key="sev">
+          <div v-if="findingsByTask[task.id]" class="mt-2 flex gap-1.5">
+            <template v-for="(count, sev) in findingsByTask[task.id]" :key="sev">
               <span
                 v-if="count > 0"
                 class="rounded-full px-2 py-0.5 text-xs font-medium"

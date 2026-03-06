@@ -22,7 +22,7 @@ const tasks = computed(() => data.value?.tasks ?? [])
     <div v-else class="space-y-4 mt-4">
       <div v-for="task in tasks" :key="task.id" class="rounded-lg border p-4">
         <div class="flex items-center justify-between mb-2">
-          <NuxtLink :to="`/tasks/${task.id}`" class="font-mono text-sm text-info hover:underline">
+          <NuxtLink :to="`/tasks/${task.id}`" class="font-mono text-sm text-info hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded">
             {{ task.id }}
           </NuxtLink>
           <span v-if="task.needsInputAt" class="text-xs text-muted-foreground">
