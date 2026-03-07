@@ -1,6 +1,12 @@
 <script setup lang="ts">
 import { useResumeTask } from '~/composables/useTasks'
 import { validateResumePayload } from '~/lib/resume'
+import Card from '~/components/ui/card/Card.vue'
+import CardContent from '~/components/ui/card/CardContent.vue'
+import CardHeader from '~/components/ui/card/CardHeader.vue'
+import CardTitle from '~/components/ui/card/CardTitle.vue'
+import Button from '~/components/ui/button/Button.vue'
+import Textarea from '~/components/ui/textarea/Textarea.vue'
 
 const props = defineProps<{
   taskId: string
@@ -30,36 +36,40 @@ function submit() {
 </script>
 
 <template>
-  <div class="rounded-lg border border-warning/30 bg-warning-muted p-4">
-    <h4 :id="`question-${taskId}`" class="font-medium text-warning-muted-foreground">{{ question }}</h4>
-    <div v-if="options?.length" class="mt-3 space-y-2" role="group" :aria-label="`Options for: ${question}`">
-      <button
-        v-for="opt in options" :key="opt"
-        class="block w-full rounded border px-3 py-2 text-left text-sm hover:bg-warning-muted transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-        :class="answer === opt ? 'border-warning bg-warning-muted' : 'border-border'"
-        :aria-pressed="answer === opt"
-        @click="answer = opt"
-      >
-        {{ opt }}
-      </button>
-    </div>
-    <textarea
-      v-model="answer"
-      :placeholder="options?.length ? 'Or type a custom answer...' : 'Type your answer...'"
-      :aria-labelledby="`question-${taskId}`"
-      class="mt-3 w-full rounded border border-input bg-background p-2 text-sm focus:outline-none focus:ring-1 focus:ring-ring"
-      rows="2"
-    />
-    <div class="mt-2 flex items-center gap-2">
-      <button
-        :disabled="!canSubmit"
-        class="rounded bg-warning px-4 py-1.5 text-sm text-warning-foreground hover:bg-warning/90 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-        @click="submit"
-      >
-        {{ isPending ? 'Sending...' : 'Send Answer' }}
-      </button>
-      <span v-if="validationError" class="text-xs text-destructive">{{ validationError }}</span>
-      <span v-else-if="error" class="text-xs text-destructive">{{ (error as Error).message }}</span>
-    </div>
-  </div>
+  <Card class="border-warning/30 bg-warning-muted">
+    <CardHeader class="pb-2">
+      <CardTitle :id="`question-${taskId}`" class="text-base text-warning-muted-foreground">{{ question }}</CardTitle>
+    </CardHeader>
+    <CardContent>
+      <div v-if="options?.length" class="space-y-2" role="group" :aria-label="`Options for: ${question}`">
+        <Button
+          v-for="opt in options" :key="opt"
+          variant="outline"
+          class="w-full justify-start text-left"
+          :class="answer === opt ? 'border-warning bg-warning-muted' : ''"
+          :aria-pressed="answer === opt"
+          @click="answer = opt"
+        >
+          {{ opt }}
+        </Button>
+      </div>
+      <Textarea
+        v-model="answer"
+        :placeholder="options?.length ? 'Or type a custom answer...' : 'Type your answer...'"
+        :aria-labelledby="`question-${taskId}`"
+        class="mt-3"
+      />
+      <div class="mt-2 flex items-center gap-2">
+        <Button
+          :disabled="!canSubmit"
+          size="sm"
+          @click="submit"
+        >
+          {{ isPending ? 'Sending...' : 'Send Answer' }}
+        </Button>
+        <span v-if="validationError" class="text-xs text-destructive">{{ validationError }}</span>
+        <span v-else-if="error" class="text-xs text-destructive">{{ (error as Error).message }}</span>
+      </div>
+    </CardContent>
+  </Card>
 </template>

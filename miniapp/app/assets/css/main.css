@@ -62,25 +62,26 @@
 
 /* --- Dark theme (class-based, shadcn convention) --- */
 .dark {
-  --color-background: hsl(222.2 84% 4.9%);
+  --color-background: hsl(224 71% 4%);
   --color-foreground: hsl(210 40% 98%);
 
-  --color-card: hsl(222.2 84% 4.9%);
+  /* Elevated card surface — slightly lighter than background */
+  --color-card: hsl(222 47% 8%);
   --color-card-foreground: hsl(210 40% 98%);
 
-  --color-popover: hsl(222.2 84% 4.9%);
+  --color-popover: hsl(222 47% 8%);
   --color-popover-foreground: hsl(210 40% 98%);
 
   --color-primary: hsl(210 40% 98%);
   --color-primary-foreground: hsl(222.2 47.4% 11.2%);
 
-  --color-secondary: hsl(217.2 32.6% 17.5%);
+  --color-secondary: hsl(217.2 32.6% 14%);
   --color-secondary-foreground: hsl(210 40% 98%);
 
-  --color-muted: hsl(217.2 32.6% 17.5%);
+  --color-muted: hsl(217.2 32.6% 14%);
   --color-muted-foreground: hsl(215 20.2% 65.1%);
 
-  --color-accent: hsl(217.2 32.6% 17.5%);
+  --color-accent: hsl(217.2 32.6% 14%);
   --color-accent-foreground: hsl(210 40% 98%);
 
   --color-destructive: hsl(0 62.8% 30.6%);
@@ -93,29 +94,29 @@
   /* Semantic status — dark variants */
   --color-success: hsl(142 71% 45%);
   --color-success-foreground: hsl(143 85% 96%);
-  --color-success-muted: hsl(142 40% 14%);
+  --color-success-muted: hsl(142 40% 12%);
   --color-success-muted-foreground: hsl(142 60% 60%);
 
   --color-warning: hsl(38 92% 50%);
   --color-warning-foreground: hsl(38 97% 97%);
-  --color-warning-muted: hsl(38 50% 14%);
+  --color-warning-muted: hsl(38 50% 12%);
   --color-warning-muted-foreground: hsl(38 80% 65%);
 
   --color-info: hsl(221 83% 53%);
   --color-info-foreground: hsl(214 100% 97%);
-  --color-info-muted: hsl(221 50% 14%);
+  --color-info-muted: hsl(221 50% 12%);
   --color-info-muted-foreground: hsl(221 70% 65%);
 
   --color-severity-critical: hsl(0 84% 60%);
-  --color-severity-critical-muted: hsl(0 50% 14%);
+  --color-severity-critical-muted: hsl(0 50% 12%);
   --color-severity-critical-foreground: hsl(0 80% 70%);
 
   --color-severity-major: hsl(25 95% 53%);
-  --color-severity-major-muted: hsl(25 50% 14%);
+  --color-severity-major-muted: hsl(25 50% 12%);
   --color-severity-major-foreground: hsl(25 80% 65%);
 
   --color-severity-minor: hsl(48 96% 53%);
-  --color-severity-minor-muted: hsl(48 50% 14%);
+  --color-severity-minor-muted: hsl(48 50% 12%);
   --color-severity-minor-foreground: hsl(48 80% 65%);
 }
 
@@ -129,5 +130,32 @@
   body {
     background-color: var(--color-background);
     color: var(--color-foreground);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* Smooth transitions on interactive elements */
+  a, button, [role="button"] {
+    transition: color 0.15s ease, background-color 0.15s ease, border-color 0.15s ease, opacity 0.15s ease;
+  }
+
+  /* Custom scrollbar for dark theme */
+  .dark ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  .dark ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .dark ::-webkit-scrollbar-thumb {
+    background: hsl(217.2 32.6% 22%);
+    border-radius: 3px;
+  }
+
+  /* Code block styling */
+  pre {
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 0.75rem;
+    line-height: 1.5;
   }
 }
