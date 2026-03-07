@@ -21,6 +21,7 @@ logs
 # Playwright test artifacts (not baselines)
 e2e/results/
 e2e/test-results/
+e2e/visual-report.json
 
 # Local env files
 .env

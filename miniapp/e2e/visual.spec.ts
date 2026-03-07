@@ -11,7 +11,7 @@
  */
 import { test, expect } from '@playwright/test'
 
-/* ── Mock layer (same data as smoke.spec.ts) ─────────────────────────── */
+/* -- Mock layer (same data as smoke.spec.ts) ----------------------------- */
 
 const MOCK_TASKS = {
   tasks: [
@@ -115,7 +115,7 @@ async function mockApi(page: import('@playwright/test').Page) {
   await page.route('**/api/v1/miniapp/stream**', (route) => route.abort())
 }
 
-/* ── Visual baseline tests ───────────────────────────────────────────── */
+/* -- Visual baseline tests ------------------------------------------------ */
 
 test.describe('Visual baselines', () => {
   test.beforeEach(async ({ page }) => {
@@ -152,5 +152,53 @@ test.describe('Visual baselines', () => {
     await page.goto('/reviews')
     await expect(page.locator('h1')).toHaveText('Review Center')
     await expect(page).toHaveScreenshot('reviews.png', { fullPage: true })
+  })
+})
+
+/* -- Empty-state visual baselines ----------------------------------------- */
+
+async function mockEmptyApi(page: import('@playwright/test').Page) {
+  await page.route('**/api/v1/miniapp/tasks**', async (route) => {
+    const url = route.request().url()
+    if (url.includes('/tasks/task-')) {
+      return route.fulfill({ status: 404, json: { error: 'not found' } })
+    }
+    return route.fulfill({ json: { tasks: [], total: 0 } })
+  })
+  await page.route('**/api/v1/miniapp/tasks/*/events**', async (route) => {
+    return route.fulfill({ json: { events: [] } })
+  })
+  await page.route('**/api/v1/miniapp/stream**', (route) => route.abort())
+}
+
+test.describe('Empty-state baselines', () => {
+  test.beforeEach(async ({ page }) => {
+    await mockEmptyApi(page)
+  })
+
+  test('dashboard empty', async ({ page }) => {
+    await page.goto('/')
+    await expect(page.locator('h1')).toHaveText('Dashboard')
+    await expect(page.locator('nav')).toBeVisible()
+    await expect(page).toHaveScreenshot('dashboard-empty.png', { fullPage: true })
+  })
+
+  test('tasks list empty', async ({ page }) => {
+    await page.goto('/tasks')
+    await expect(page.locator('h1')).toHaveText('Tasks')
+    await expect(page.getByRole('heading', { name: 'No tasks' })).toBeVisible()
+    await expect(page).toHaveScreenshot('tasks-list-empty.png', { fullPage: true })
+  })
+
+  test('inbox empty', async ({ page }) => {
+    await page.goto('/inbox')
+    await expect(page.locator('h1')).toHaveText('Awaiting Input')
+    await expect(page).toHaveScreenshot('inbox-empty.png', { fullPage: true })
+  })
+
+  test('reviews empty', async ({ page }) => {
+    await page.goto('/reviews')
+    await expect(page.locator('h1')).toHaveText('Review Center')
+    await expect(page).toHaveScreenshot('reviews-empty.png', { fullPage: true })
   })
 })
