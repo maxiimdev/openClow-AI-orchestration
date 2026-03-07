@@ -10,6 +10,7 @@ import CardHeader from '~/components/ui/card/CardHeader.vue'
 import Badge from '~/components/ui/badge/Badge.vue'
 import Button from '~/components/ui/button/Button.vue'
 import Skeleton from '~/components/ui/skeleton/Skeleton.vue'
+import { ArrowLeft, GitBranch, Clock, Terminal, AlertTriangle, ShieldAlert } from 'lucide-vue-next'
 
 const route = useRoute()
 const taskId = computed(() => route.params.id as string)
@@ -47,9 +48,12 @@ const reviewDiffEvents = computed(() => {
 </script>
 
 <template>
-  <div class="p-4">
-    <StaleIndicator class="mb-2" />
-    <NuxtLink to="/tasks" class="text-sm text-info hover:underline mb-4 inline-block focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded">&larr; Tasks</NuxtLink>
+  <div class="p-4 sm:p-6">
+    <StaleIndicator class="mb-3" />
+    <NuxtLink to="/tasks" class="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground mb-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded">
+      <ArrowLeft class="h-3.5 w-3.5" />
+      Tasks
+    </NuxtLink>
 
     <div v-if="taskPending" class="space-y-4">
       <Skeleton class="h-32 rounded-xl" />
@@ -60,20 +64,26 @@ const reviewDiffEvents = computed(() => {
 
     <template v-else-if="task">
       <Card class="mb-4">
-        <CardHeader class="pb-2">
-          <div class="flex items-center justify-between">
-            <h1 class="text-lg font-bold font-mono">{{ truncateId(task.id, 20) }}</h1>
+        <CardHeader class="pb-3">
+          <div class="flex items-center justify-between gap-2">
+            <h1 class="text-base font-semibold font-mono truncate">{{ truncateId(task.id, 20) }}</h1>
             <StatusBadge :status="task.status" />
           </div>
         </CardHeader>
         <CardContent>
-          <div class="flex items-center gap-2 text-sm text-muted-foreground">
-            <Badge variant="secondary" class="text-xs">{{ task.mode }}</Badge>
-            <span v-if="task.branch">{{ task.branch }}</span>
+          <div class="flex flex-wrap items-center gap-2 text-sm">
+            <Badge variant="secondary" class="text-xs font-medium">{{ task.mode }}</Badge>
+            <span v-if="task.branch" class="inline-flex items-center gap-1 text-muted-foreground text-xs">
+              <GitBranch class="h-3 w-3" />
+              {{ task.branch }}
+            </span>
           </div>
-          <p v-if="task.message" class="mt-2 text-sm text-muted-foreground">{{ task.message }}</p>
-          <div class="mt-2 flex items-center gap-3 text-xs text-muted-foreground/70">
-            <span>Created {{ formatRelativeTime(task.createdAt) }}</span>
+          <p v-if="task.message" class="mt-3 text-sm text-muted-foreground leading-relaxed">{{ task.message }}</p>
+          <div class="mt-3 flex items-center gap-4 text-xs text-muted-foreground">
+            <span class="inline-flex items-center gap-1">
+              <Clock class="h-3 w-3" />
+              Created {{ formatRelativeTime(task.createdAt) }}
+            </span>
             <span>Updated {{ formatRelativeTime(task.updatedAt) }}</span>
           </div>
         </CardContent>
@@ -82,55 +92,69 @@ const reviewDiffEvents = computed(() => {
       <!-- Reviewer action banner: review_fail with patch path -->
       <Card v-if="task.status === 'review_fail'" class="mb-4 border-severity-major bg-severity-major-muted">
         <CardContent class="pt-4">
-          <div class="flex items-center gap-2 mb-1">
-            <span class="font-medium text-severity-major-foreground text-sm">Patch Required</span>
-            <span v-if="iterationInfo" class="text-xs text-muted-foreground">
-              (iteration {{ iterationInfo.current }} of {{ iterationInfo.max }}, {{ iterationInfo.remaining }} remaining)
-            </span>
+          <div class="flex items-start gap-3">
+            <div class="rounded-lg bg-severity-major-muted p-2 mt-0.5">
+              <AlertTriangle class="h-4 w-4 text-severity-major-foreground" />
+            </div>
+            <div class="flex-1 min-w-0">
+              <div class="flex items-center gap-2 mb-1">
+                <span class="font-medium text-severity-major-foreground text-sm">Patch Required</span>
+                <span v-if="iterationInfo" class="text-xs text-muted-foreground">
+                  (iteration {{ iterationInfo.current }} of {{ iterationInfo.max }}, {{ iterationInfo.remaining }} remaining)
+                </span>
+              </div>
+              <p class="text-xs text-muted-foreground mb-3">This review found issues that must be fixed. A patch task will address the findings below, then trigger a re-review.</p>
+              <div class="flex items-center gap-2">
+                <Button
+                  v-if="canRequestPatch(task)"
+                  size="sm"
+                  :disabled="reReviewLoading"
+                  @click="handleReReview"
+                >
+                  {{ reReviewLoading ? 'Requesting...' : 'Request Patch & Re-review' }}
+                </Button>
+                <Button
+                  v-if="canRequestReReview(task)"
+                  variant="outline"
+                  size="sm"
+                  :disabled="reReviewLoading"
+                  @click="handleReReview"
+                >
+                  {{ reReviewLoading ? 'Requesting...' : 'Re-review Only' }}
+                </Button>
+              </div>
+              <p v-if="reReviewError" class="mt-2 text-xs text-destructive">{{ reReviewError }}</p>
+            </div>
           </div>
-          <p class="text-xs text-muted-foreground mb-3">This review found issues that must be fixed. A patch task will address the findings below, then trigger a re-review.</p>
-          <div class="flex items-center gap-2">
-            <Button
-              v-if="canRequestPatch(task)"
-              size="sm"
-              :disabled="reReviewLoading"
-              @click="handleReReview"
-            >
-              {{ reReviewLoading ? 'Requesting...' : 'Request Patch & Re-review' }}
-            </Button>
-            <Button
-              v-if="canRequestReReview(task)"
-              variant="outline"
-              size="sm"
-              :disabled="reReviewLoading"
-              @click="handleReReview"
-            >
-              {{ reReviewLoading ? 'Requesting...' : 'Re-review Only' }}
-            </Button>
-          </div>
-          <p v-if="reReviewError" class="mt-2 text-xs text-destructive">{{ reReviewError }}</p>
         </CardContent>
       </Card>
 
       <!-- Reviewer action banner: escalated -->
       <Card v-else-if="task.status === 'escalated'" class="mb-4 border-severity-critical bg-severity-critical-muted">
         <CardContent class="pt-4">
-          <div class="flex items-center gap-2 mb-1">
-            <span class="font-medium text-severity-critical-foreground text-sm">Escalated — Manual Review Needed</span>
+          <div class="flex items-start gap-3">
+            <div class="rounded-lg bg-severity-critical-muted p-2 mt-0.5">
+              <ShieldAlert class="h-4 w-4 text-severity-critical-foreground" />
+            </div>
+            <div class="flex-1 min-w-0">
+              <div class="flex items-center gap-2 mb-1">
+                <span class="font-medium text-severity-critical-foreground text-sm">Escalated — Manual Review Needed</span>
+              </div>
+              <p class="text-xs text-muted-foreground mb-3">Max review iterations reached. The findings below could not be auto-resolved and require human intervention.</p>
+              <div class="flex items-center gap-2">
+                <Button
+                  v-if="canRequestReReview(task)"
+                  variant="outline"
+                  size="sm"
+                  :disabled="reReviewLoading"
+                  @click="handleReReview"
+                >
+                  {{ reReviewLoading ? 'Requesting...' : 'Force Re-review' }}
+                </Button>
+              </div>
+              <p v-if="reReviewError" class="mt-2 text-xs text-destructive">{{ reReviewError }}</p>
+            </div>
           </div>
-          <p class="text-xs text-muted-foreground mb-3">Max review iterations reached. The findings below could not be auto-resolved and require human intervention.</p>
-          <div class="flex items-center gap-2">
-            <Button
-              v-if="canRequestReReview(task)"
-              variant="outline"
-              size="sm"
-              :disabled="reReviewLoading"
-              @click="handleReReview"
-            >
-              {{ reReviewLoading ? 'Requesting...' : 'Force Re-review' }}
-            </Button>
-          </div>
-          <p v-if="reReviewError" class="mt-2 text-xs text-destructive">{{ reReviewError }}</p>
         </CardContent>
       </Card>
 
@@ -147,18 +171,21 @@ const reviewDiffEvents = computed(() => {
       <!-- Result -->
       <Card v-if="task.result" class="mb-4">
         <CardHeader class="pb-2">
-          <h2 class="text-sm font-medium">Result</h2>
+          <div class="flex items-center gap-2">
+            <Terminal class="h-4 w-4 text-muted-foreground" />
+            <h2 class="text-sm font-medium">Result</h2>
+          </div>
         </CardHeader>
         <CardContent>
           <div class="flex items-center gap-3 text-sm">
-            <span :class="task.result.exitCode === 0 ? 'text-success' : 'text-destructive'" class="font-mono">
+            <span :class="task.result.exitCode === 0 ? 'text-success' : 'text-destructive'" class="font-mono font-medium">
               exit {{ task.result.exitCode }}
             </span>
             <span v-if="task.result.durationMs > 0" class="text-muted-foreground">{{ (task.result.durationMs / 1000).toFixed(1) }}s</span>
             <span v-if="task.result.truncated" class="text-warning text-xs">(truncated)</span>
           </div>
-          <pre v-if="task.result.stdout" class="mt-2 text-xs bg-muted rounded p-2 overflow-x-auto max-h-48 overflow-y-auto">{{ task.result.stdout }}</pre>
-          <pre v-if="task.result.stderr" class="mt-2 text-xs bg-severity-critical-muted text-severity-critical-foreground rounded p-2 overflow-x-auto max-h-32 overflow-y-auto">{{ task.result.stderr }}</pre>
+          <pre v-if="task.result.stdout" class="mt-3 text-xs bg-muted/50 border border-border rounded-lg p-3 overflow-x-auto max-h-48 overflow-y-auto">{{ task.result.stdout }}</pre>
+          <pre v-if="task.result.stderr" class="mt-2 text-xs bg-severity-critical-muted border border-severity-critical/20 text-severity-critical-foreground rounded-lg p-3 overflow-x-auto max-h-32 overflow-y-auto">{{ task.result.stderr }}</pre>
         </CardContent>
       </Card>
 
@@ -168,18 +195,18 @@ const reviewDiffEvents = computed(() => {
           <h2 class="text-sm font-medium">Review Findings</h2>
         </CardHeader>
         <CardContent>
-          <p class="text-sm text-muted-foreground">{{ task.reviewFindings }}</p>
+          <p class="text-sm text-muted-foreground leading-relaxed">{{ task.reviewFindings }}</p>
         </CardContent>
       </Card>
 
       <!-- Structured findings -->
       <div v-if="task.structuredFindings?.length" class="mb-4">
         <h2 class="text-sm font-medium mb-2">Review Findings</h2>
-        <p v-if="task.status === 'review_fail' || task.status === 'escalated'" class="text-sm text-muted-foreground mb-2">{{ getReviewCardSummary(task) }}</p>
+        <p v-if="task.status === 'review_fail' || task.status === 'escalated'" class="text-sm text-muted-foreground mb-3">{{ getReviewCardSummary(task) }}</p>
         <FindingsPanel :findings="task.structuredFindings" />
       </div>
 
-      <!-- Review iteration history (diff summary) -->
+      <!-- Review iteration history -->
       <Card v-if="reviewDiffEvents.length > 1" class="mb-4">
         <CardHeader class="pb-2">
           <h2 class="text-sm font-medium">Review Iteration History</h2>
@@ -201,20 +228,22 @@ const reviewDiffEvents = computed(() => {
               >
                 {{ evt.status === 'review_pass' ? 'Passed' : evt.status === 'escalated' ? 'Escalated' : 'Failed' }}
               </Badge>
-              <span class="text-muted-foreground">{{ evt.message }}</span>
-              <span class="text-muted-foreground/70 ml-auto">{{ formatRelativeTime(evt.createdAt) }}</span>
+              <span class="text-muted-foreground truncate">{{ evt.message }}</span>
+              <span class="text-muted-foreground/70 ml-auto whitespace-nowrap">{{ formatRelativeTime(evt.createdAt) }}</span>
             </div>
           </div>
         </CardContent>
       </Card>
 
       <!-- Timeline -->
-      <h2 class="text-sm font-medium mb-2">Event Timeline</h2>
-      <div v-if="eventsPending" class="space-y-2">
-        <Skeleton v-for="i in 5" :key="i" class="h-12" />
+      <div class="mb-4">
+        <h2 class="text-sm font-medium mb-3">Event Timeline</h2>
+        <div v-if="eventsPending" class="space-y-2">
+          <Skeleton v-for="i in 5" :key="i" class="h-12 rounded-lg" />
+        </div>
+        <EmptyState v-else-if="!events.length" title="No events yet" />
+        <TaskTimeline v-else :events="events" />
       </div>
-      <EmptyState v-else-if="!events.length" title="No events yet" />
-      <TaskTimeline v-else :events="events" />
     </template>
   </div>
 </template>
