@@ -4,6 +4,7 @@ import { truncateId, formatRelativeTime } from '~/lib/mappers'
 import Card from '~/components/ui/card/Card.vue'
 import CardContent from '~/components/ui/card/CardContent.vue'
 import CardHeader from '~/components/ui/card/CardHeader.vue'
+import Skeleton from '~/components/ui/skeleton/Skeleton.vue'
 
 const { data, isPending, error, refetch } = useTasksList({ status: 'needs_input' })
 const tasks = computed(() => data.value?.tasks ?? [])
@@ -15,7 +16,7 @@ const tasks = computed(() => data.value?.tasks ?? [])
     <StaleIndicator />
 
     <div v-if="isPending" class="space-y-3 mt-4">
-      <div v-for="i in 3" :key="i" class="h-32 rounded-xl bg-muted animate-pulse" />
+      <Skeleton v-for="i in 3" :key="i" class="h-32 rounded-xl" />
     </div>
 
     <ErrorState v-else-if="error" :message="(error as Error).message" @retry="refetch()" />

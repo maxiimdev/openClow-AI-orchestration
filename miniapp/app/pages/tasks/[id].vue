@@ -9,6 +9,7 @@ import CardContent from '~/components/ui/card/CardContent.vue'
 import CardHeader from '~/components/ui/card/CardHeader.vue'
 import Badge from '~/components/ui/badge/Badge.vue'
 import Button from '~/components/ui/button/Button.vue'
+import Skeleton from '~/components/ui/skeleton/Skeleton.vue'
 
 const route = useRoute()
 const taskId = computed(() => route.params.id as string)
@@ -51,8 +52,8 @@ const reviewDiffEvents = computed(() => {
     <NuxtLink to="/tasks" class="text-sm text-info hover:underline mb-4 inline-block focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded">&larr; Tasks</NuxtLink>
 
     <div v-if="taskPending" class="space-y-4">
-      <div class="h-32 rounded-xl bg-muted animate-pulse" />
-      <div class="h-64 rounded-xl bg-muted animate-pulse" />
+      <Skeleton class="h-32 rounded-xl" />
+      <Skeleton class="h-64 rounded-xl" />
     </div>
 
     <ErrorState v-else-if="taskError" :message="(taskError as Error).message" @retry="refetchTask()" />
@@ -186,11 +187,12 @@ const reviewDiffEvents = computed(() => {
         <CardContent>
           <div class="space-y-2">
             <div v-for="(evt, idx) in reviewDiffEvents" :key="evt.id" class="flex items-center gap-2 text-xs">
-              <span class="rounded-full w-5 h-5 flex items-center justify-center text-[10px] font-medium bg-muted text-muted-foreground">
+              <Badge variant="outline" class="rounded-full w-5 h-5 flex items-center justify-center text-[10px] p-0">
                 {{ idx + 1 }}
-              </span>
-              <span
-                class="rounded-full px-2 py-0.5 font-medium"
+              </Badge>
+              <Badge
+                variant="secondary"
+                class="border-transparent"
                 :class="{
                   'bg-success-muted text-success-muted-foreground': evt.status === 'review_pass',
                   'bg-severity-major-muted text-severity-major-foreground': evt.status === 'review_fail',
@@ -198,7 +200,7 @@ const reviewDiffEvents = computed(() => {
                 }"
               >
                 {{ evt.status === 'review_pass' ? 'Passed' : evt.status === 'escalated' ? 'Escalated' : 'Failed' }}
-              </span>
+              </Badge>
               <span class="text-muted-foreground">{{ evt.message }}</span>
               <span class="text-muted-foreground/70 ml-auto">{{ formatRelativeTime(evt.createdAt) }}</span>
             </div>
@@ -209,7 +211,7 @@ const reviewDiffEvents = computed(() => {
       <!-- Timeline -->
       <h2 class="text-sm font-medium mb-2">Event Timeline</h2>
       <div v-if="eventsPending" class="space-y-2">
-        <div v-for="i in 5" :key="i" class="h-12 rounded bg-muted animate-pulse" />
+        <Skeleton v-for="i in 5" :key="i" class="h-12" />
       </div>
       <EmptyState v-else-if="!events.length" title="No events yet" />
       <TaskTimeline v-else :events="events" />
