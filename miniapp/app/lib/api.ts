@@ -61,16 +61,30 @@ function storeAuth(data: AuthResponse) {
   }))
 }
 
+function getTelegramInitData(): string | null {
+  if (import.meta.server) return null
+  const tg = (window as Record<string, unknown>).Telegram as
+    | { WebApp?: { initData?: string } }
+    | undefined
+  return tg?.WebApp?.initData ?? null
+}
+
 /**
  * Try to obtain a fresh token via Telegram WebApp initData.
  * Returns the new token on success, null otherwise.
  */
 async function tryAutoLogin(): Promise<string | null> {
   if (import.meta.server) return null
-  const tg = (window as Record<string, unknown>).Telegram as
-    | { WebApp?: { initData?: string } }
-    | undefined
-  const initData = tg?.WebApp?.initData
+
+  // Telegram WebApp.initData may not be ready immediately on cold start.
+  // Wait up to 500ms (5 x 100ms) for it to become available.
+  let initData = getTelegramInitData()
+  if (!initData) {
+    for (let i = 0; i < 5 && !initData; i++) {
+      await new Promise(r => setTimeout(r, 100))
+      initData = getTelegramInitData()
+    }
+  }
   if (!initData) return null
 
   try {
@@ -90,7 +104,31 @@ async function tryAutoLogin(): Promise<string | null> {
 
 let _autoLoginPromise: Promise<string | null> | null = null
 
+/**
+ * Auth bootstrap gate. Ensures a token is available (from localStorage or
+ * Telegram auto-login) before any protected API call proceeds.
+ * All concurrent callers share the same promise.
+ */
+function ensureAuth(): Promise<string | null> {
+  if (import.meta.server) return Promise.resolve(null)
+
+  // Fast path: token already in localStorage
+  const existing = getToken()
+  if (existing) return Promise.resolve(existing)
+
+  // Deduplicate: all callers share one auto-login attempt
+  if (!_autoLoginPromise) {
+    _autoLoginPromise = tryAutoLogin().finally(() => { _autoLoginPromise = null })
+  }
+  return _autoLoginPromise
+}
+
 async function apiFetch<T>(path: string, opts: RequestInit = {}): Promise<T> {
+  // Wait for auth bootstrap before making the request
+  if (import.meta.client) {
+    await ensureAuth()
+  }
+
   const token = getToken()
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -100,10 +138,9 @@ async function apiFetch<T>(path: string, opts: RequestInit = {}): Promise<T> {
 
   const res = await fetch(`${BASE}${path}`, { ...opts, headers })
 
-  // On 401, attempt auto-login once and retry
+  // On 401, attempt auto-login once and retry (handles token expiry)
   if (res.status === 401 && import.meta.client) {
-    clearStoredAuth()
-    // Deduplicate concurrent auto-login attempts
+    // Don't clear auth before retry — avoids race with concurrent requests
     if (!_autoLoginPromise) {
       _autoLoginPromise = tryAutoLogin().finally(() => { _autoLoginPromise = null })
     }
@@ -117,7 +154,8 @@ async function apiFetch<T>(path: string, opts: RequestInit = {}): Promise<T> {
       }
       return retry.json()
     }
-    // Auto-login failed — propagate original error
+    // Auto-login failed — clear stale auth and propagate error
+    clearStoredAuth()
     const body = await res.text().catch(() => '')
     throw new Error(`API ${res.status}: ${body}`)
   }
