@@ -1,10 +1,8 @@
 <script setup lang="ts">
 import { useAuthStore } from '~/stores/auth'
-import { useAuth } from '~/composables/useAuth'
 import { useSSE } from '~/composables/useSSE'
 
 const authStore = useAuthStore()
-const { login } = useAuth()
 const sse = useSSE()
 
 // Ensure dark class is set as early as possible (SSR head injection avoids FOUC)
@@ -12,7 +10,7 @@ useHead({
   htmlAttrs: { class: 'dark' },
 })
 
-onMounted(async () => {
+onMounted(() => {
   // Listen for auth state changes from api.ts auto-login interceptor
   window.addEventListener('miniapp:auth-updated', ((e: CustomEvent) => {
     const { token, user, tokenVersion } = e.detail
@@ -27,20 +25,11 @@ onMounted(async () => {
     sse.disconnect()
   })
 
+  // Restore any existing token from localStorage into Pinia store.
+  // Auth bootstrap (Telegram auto-login when no token exists) is handled
+  // by api.ts ensureAuth() before the first protected API call, so there
+  // is no race between page queries and auth initialization.
   authStore.restoreFromStorage()
-
-  // Auto-login via Telegram WebApp initData when no valid token is stored
-  if (!authStore.isAuthenticated) {
-    const tg = (window as Record<string, unknown>).Telegram as
-      | { WebApp?: { initData?: string } }
-      | undefined
-    const initData = tg?.WebApp?.initData
-    if (initData) {
-      try {
-        await login(initData)
-      } catch { /* auth will be retried on 401 via api.ts interceptor */ }
-    }
-  }
 
   if (authStore.isAuthenticated) {
     sse.connect()
