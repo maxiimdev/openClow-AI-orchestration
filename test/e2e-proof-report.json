@@ -6,8 +6,8 @@
     "Missing ## Security Considerations section (F1 major)",
     "eval() usage without security warning (F2 minor)"
   ],
-  "runAt": "2026-03-06T17:04:26.985Z",
-  "elapsedMs": 522,
+  "runAt": "2026-03-07T11:16:13.776Z",
+  "elapsedMs": 953,
   "eventSequence": [
     {
       "n": 1,
@@ -16,7 +16,7 @@
       "taskId": "e2e-review-loop-001",
       "message": "task received",
       "hasStructuredFindings": false,
-      "offsetMs": 61
+      "offsetMs": 69
     },
     {
       "n": 2,
@@ -25,7 +25,7 @@
       "taskId": "e2e-review-loop-001",
       "message": "validating task",
       "hasStructuredFindings": false,
-      "offsetMs": 63
+      "offsetMs": 70
     },
     {
       "n": 3,
@@ -34,7 +34,7 @@
       "taskId": "e2e-review-loop-001",
       "message": "steps: validate → checkout agent/e2e-review-test → review_loop (max 3 iterations, model: sonnet) → report",
       "hasStructuredFindings": false,
-      "offsetMs": 64
+      "offsetMs": 71
     },
     {
       "n": 4,
@@ -43,7 +43,7 @@
       "taskId": "e2e-review-loop-001",
       "message": "validation passed",
       "hasStructuredFindings": false,
-      "offsetMs": 65
+      "offsetMs": 73
     },
     {
       "n": 5,
@@ -52,7 +52,7 @@
       "taskId": "e2e-review-loop-001",
       "message": "review run (iteration 1/3)",
       "hasStructuredFindings": false,
-      "offsetMs": 66
+      "offsetMs": 74
     },
     {
       "n": 6,
@@ -61,7 +61,7 @@
       "taskId": "e2e-review-loop-001",
       "message": "checking out branch agent/e2e-review-test",
       "hasStructuredFindings": false,
-      "offsetMs": 67
+      "offsetMs": 75
     },
     {
       "n": 7,
@@ -70,7 +70,7 @@
       "taskId": "e2e-review-loop-001",
       "message": "spawning claude (model: sonnet)",
       "hasStructuredFindings": false,
-      "offsetMs": 81
+      "offsetMs": 87
     },
     {
       "n": 8,
@@ -80,7 +80,7 @@
       "message": "review failed (iter 1/3), severity=major",
       "hasStructuredFindings": true,
       "structuredFindingsCount": 2,
-      "offsetMs": 432
+      "offsetMs": 866
     },
     {
       "n": 9,
@@ -89,7 +89,7 @@
       "taskId": "e2e-review-loop-001",
       "message": "patch run (iteration 2/3)",
       "hasStructuredFindings": false,
-      "offsetMs": 433
+      "offsetMs": 867
     },
     {
       "n": 10,
@@ -98,7 +98,7 @@
       "taskId": "e2e-review-loop-001-patch-iter2",
       "message": "checking out branch agent/e2e-review-test",
       "hasStructuredFindings": false,
-      "offsetMs": 434
+      "offsetMs": 868
     },
     {
       "n": 11,
@@ -107,7 +107,7 @@
       "taskId": "e2e-review-loop-001-patch-iter2",
       "message": "spawning claude (model: sonnet)",
       "hasStructuredFindings": false,
-      "offsetMs": 446
+      "offsetMs": 879
     },
     {
       "n": 12,
@@ -116,7 +116,7 @@
       "taskId": "e2e-review-loop-001",
       "message": "review run (iteration 2/3)",
       "hasStructuredFindings": false,
-      "offsetMs": 483
+      "offsetMs": 915
     },
     {
       "n": 13,
@@ -125,7 +125,7 @@
       "taskId": "e2e-review-loop-001",
       "message": "checking out branch agent/e2e-review-test",
       "hasStructuredFindings": false,
-      "offsetMs": 484
+      "offsetMs": 916
     },
     {
       "n": 14,
@@ -134,7 +134,7 @@
       "taskId": "e2e-review-loop-001",
       "message": "spawning claude (model: sonnet)",
       "hasStructuredFindings": false,
-      "offsetMs": 492
+      "offsetMs": 924
     },
     {
       "n": 15,
@@ -143,7 +143,7 @@
       "taskId": "e2e-review-loop-001",
       "message": "review passed (iter 2/3)",
       "hasStructuredFindings": false,
-      "offsetMs": 520
+      "offsetMs": 952
     },
     {
       "n": 16,
@@ -152,7 +152,7 @@
       "taskId": "e2e-review-loop-001",
       "message": "reporting result",
       "hasStructuredFindings": false,
-      "offsetMs": 521
+      "offsetMs": 952
     }
   ],
   "findingsPayload": [
@@ -180,7 +180,7 @@
     "status": "review_pass",
     "reviewIteration": 2,
     "reviewMaxIterations": 3,
-    "reviewLoopDurationMs": 454
+    "reviewLoopDurationMs": 878
   },
   "provenSequence": [
     "review_loop_fail/report  ← iter 1: REVIEW_FAIL with 2 structured findings",

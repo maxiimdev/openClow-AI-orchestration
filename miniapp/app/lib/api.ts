@@ -58,6 +58,10 @@ export function cancelTask(id: string): Promise<{ ok: boolean; task: Task }> {
   return apiFetch(`/tasks/${encodeURIComponent(id)}/cancel`, { method: 'POST', body: '{}' })
 }
 
+export function requestReReview(id: string): Promise<{ ok: boolean; task: Task }> {
+  return apiFetch(`/tasks/${encodeURIComponent(id)}/rereview`, { method: 'POST', body: '{}' })
+}
+
 export function authenticate(initData: string): Promise<AuthResponse> {
   return apiFetch('/auth/telegram', {
     method: 'POST',

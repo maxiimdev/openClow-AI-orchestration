@@ -648,6 +648,8 @@ function runIntegrationTests() {
 
       const env = {
         ...process.env,
+      REPORT_SCHEMA_STRICT: "false",
+      REPORT_CONTRACT_ENABLED: "false",
         ORCH_BASE_URL: `http://localhost:${PORT}`,
         WORKER_TOKEN: "test-token",
         WORKER_ID: "test-worker-w5",

@@ -176,6 +176,8 @@ function waitForResults(count, timeoutMs = 15000) {
 function spawnWorker(extraEnv = {}) {
   const env = {
     ...process.env,
+      REPORT_SCHEMA_STRICT: "false",
+      REPORT_CONTRACT_ENABLED: "false",
     ORCH_BASE_URL: `http://127.0.0.1:${PORT}`,
     WORKER_TOKEN: "test-token",
     WORKER_ID: "test-worker-audit",

@@ -109,3 +109,11 @@ export interface SSEMessage {
   meta: Record<string, unknown>
   updatedAt: string
 }
+
+export interface ReviewDiffSummary {
+  previousIteration: number
+  currentIteration: number
+  findingsResolved: Finding[]
+  findingsRemaining: Finding[]
+  findingsNew: Finding[]
+}
