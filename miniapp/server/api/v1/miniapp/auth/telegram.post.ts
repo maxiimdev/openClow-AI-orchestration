@@ -1,4 +1,4 @@
-import { validateInitData, signToken } from '../../../../lib/crypto'
+import { validateInitData, signToken, getSecretFingerprint } from '../../../../lib/crypto'
 
 export default defineEventHandler(async (event) => {
   const body = await readBody(event)
@@ -18,5 +18,6 @@ export default defineEventHandler(async (event) => {
   return {
     token,
     user: { id: user.id, firstName: user.first_name, username: user.username || '' },
+    tokenVersion: getSecretFingerprint(),
   }
 })

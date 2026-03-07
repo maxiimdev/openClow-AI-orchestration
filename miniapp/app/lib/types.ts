@@ -99,6 +99,7 @@ export interface EventsResponse {
 export interface AuthResponse {
   token: string
   user: { id: number; firstName: string; username: string }
+  tokenVersion?: string
 }
 
 export interface ReviewDiffSummary {

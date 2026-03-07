@@ -6,7 +6,7 @@ export function useAuth() {
 
   async function login(initData: string) {
     const res = await authenticate(initData)
-    store.setAuth(res.token, res.user)
+    store.setAuth(res.token, res.user, res.tokenVersion)
     return res
   }
 

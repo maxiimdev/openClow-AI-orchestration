@@ -2,16 +2,63 @@ import type { TasksResponse, Task, EventsResponse, AuthResponse } from './types'
 
 const BASE = '/api/v1/miniapp'
 
+const TOKEN_KEY_PREFIX = 'miniapp_token'
+const USER_KEY_PREFIX = 'miniapp_user'
+const VERSION_KEY = 'miniapp_token_version'
+
+function versionedKey(prefix: string, version: string | null): string {
+  return version ? `${prefix}_v${version}` : prefix
+}
+
+function getStoredVersion(): string | null {
+  if (import.meta.server) return null
+  return localStorage.getItem(VERSION_KEY)
+}
+
 function getToken(): string | null {
   if (import.meta.server) return null
-  return localStorage.getItem('miniapp_token')
+  const v = getStoredVersion()
+  return localStorage.getItem(versionedKey(TOKEN_KEY_PREFIX, v))
+    ?? localStorage.getItem(TOKEN_KEY_PREFIX) // legacy fallback
 }
 
 function clearStoredAuth() {
-  if (import.meta.client) {
-    localStorage.removeItem('miniapp_token')
-    localStorage.removeItem('miniapp_user')
+  if (!import.meta.client) return
+  const v = getStoredVersion()
+  localStorage.removeItem(versionedKey(TOKEN_KEY_PREFIX, v))
+  localStorage.removeItem(versionedKey(USER_KEY_PREFIX, v))
+  // Also remove legacy unversioned keys
+  localStorage.removeItem(TOKEN_KEY_PREFIX)
+  localStorage.removeItem(USER_KEY_PREFIX)
+  // Notify Pinia store via custom event
+  window.dispatchEvent(new CustomEvent('miniapp:auth-cleared'))
+}
+
+function storeAuth(data: AuthResponse) {
+  if (!import.meta.client) return
+  const v = data.tokenVersion ?? null
+  if (v) {
+    // Clean up old versioned keys
+    const toRemove: string[] = []
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i)
+      if (!key) continue
+      if ((key.startsWith(TOKEN_KEY_PREFIX) || key.startsWith(USER_KEY_PREFIX)) &&
+          key !== versionedKey(TOKEN_KEY_PREFIX, v) &&
+          key !== versionedKey(USER_KEY_PREFIX, v) &&
+          key !== VERSION_KEY) {
+        toRemove.push(key)
+      }
+    }
+    for (const key of toRemove) localStorage.removeItem(key)
+    localStorage.setItem(VERSION_KEY, v)
   }
+  localStorage.setItem(versionedKey(TOKEN_KEY_PREFIX, v), data.token)
+  localStorage.setItem(versionedKey(USER_KEY_PREFIX, v), JSON.stringify(data.user))
+  // Notify Pinia store via custom event
+  window.dispatchEvent(new CustomEvent('miniapp:auth-updated', {
+    detail: { token: data.token, user: data.user, tokenVersion: v },
+  }))
 }
 
 /**
@@ -34,8 +81,7 @@ async function tryAutoLogin(): Promise<string | null> {
     })
     if (!res.ok) return null
     const data: AuthResponse = await res.json()
-    localStorage.setItem('miniapp_token', data.token)
-    localStorage.setItem('miniapp_user', JSON.stringify(data.user))
+    storeAuth(data)
     return data.token
   } catch {
     return null
