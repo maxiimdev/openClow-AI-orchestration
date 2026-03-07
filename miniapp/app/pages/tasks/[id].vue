@@ -2,7 +2,8 @@
 import { useTaskDetail } from '~/composables/useTasks'
 import { useTaskEvents } from '~/composables/useTaskEvents'
 import { truncateId, formatRelativeTime } from '~/lib/mappers'
-import { getReviewCardSummary } from '~/lib/reviews'
+import { getReviewCardSummary, canRequestPatch, canRequestReReview, getIterationInfo } from '~/lib/reviews'
+import { requestReReview } from '~/lib/api'
 
 const route = useRoute()
 const taskId = computed(() => route.params.id as string)
@@ -11,6 +12,32 @@ const { data: task, isPending: taskPending, error: taskError, refetch: refetchTa
 const { data: eventsData, isPending: eventsPending } = useTaskEvents(taskId)
 
 const events = computed(() => eventsData.value?.events ?? [])
+
+const reReviewLoading = ref(false)
+const reReviewError = ref<string | null>(null)
+
+async function handleReReview() {
+  if (!task.value || reReviewLoading.value) return
+  reReviewLoading.value = true
+  reReviewError.value = null
+  try {
+    await requestReReview(task.value.id)
+    await refetchTask()
+  } catch (err) {
+    reReviewError.value = err instanceof Error ? err.message : 'Re-review request failed'
+  } finally {
+    reReviewLoading.value = false
+  }
+}
+
+const iterationInfo = computed(() => task.value ? getIterationInfo(task.value) : null)
+
+const reviewDiffEvents = computed(() => {
+  if (!task.value) return []
+  return events.value.filter(e =>
+    e.status === 'review_fail' || e.status === 'review_pass' || e.status === 'escalated'
+  )
+})
 </script>
 
 <template>
@@ -42,21 +69,53 @@ const events = computed(() => eventsData.value?.events ?? [])
         </div>
       </div>
 
-      <!-- Reviewer action banner -->
+      <!-- Reviewer action banner: review_fail with patch path -->
       <div v-if="task.status === 'review_fail'" class="rounded-lg border border-severity-major bg-severity-major-muted p-4 mb-4">
         <div class="flex items-center gap-2 mb-1">
           <span class="font-medium text-severity-major-foreground text-sm">Patch Required</span>
-          <span v-if="task.meta.reviewIteration" class="text-xs text-muted-foreground">
-            (iteration {{ task.meta.reviewIteration }}<span v-if="task.meta.reviewMaxIterations"> of {{ task.meta.reviewMaxIterations }}</span>)
+          <span v-if="iterationInfo" class="text-xs text-muted-foreground">
+            (iteration {{ iterationInfo.current }} of {{ iterationInfo.max }}, {{ iterationInfo.remaining }} remaining)
           </span>
         </div>
-        <p class="text-xs text-muted-foreground">This review found issues that must be fixed. A patch task will address the findings below, then trigger a re-review.</p>
+        <p class="text-xs text-muted-foreground mb-3">This review found issues that must be fixed. A patch task will address the findings below, then trigger a re-review.</p>
+        <div class="flex items-center gap-2">
+          <button
+            v-if="canRequestPatch(task)"
+            class="rounded-md bg-severity-major-foreground text-white px-3 py-1.5 text-xs font-medium hover:opacity-90 transition-opacity disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            :disabled="reReviewLoading"
+            @click="handleReReview"
+          >
+            {{ reReviewLoading ? 'Requesting...' : 'Request Patch & Re-review' }}
+          </button>
+          <button
+            v-if="canRequestReReview(task)"
+            class="rounded-md border border-severity-major-foreground text-severity-major-foreground px-3 py-1.5 text-xs font-medium hover:bg-severity-major-muted/50 transition-colors disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            :disabled="reReviewLoading"
+            @click="handleReReview"
+          >
+            {{ reReviewLoading ? 'Requesting...' : 'Re-review Only' }}
+          </button>
+        </div>
+        <p v-if="reReviewError" class="mt-2 text-xs text-destructive">{{ reReviewError }}</p>
       </div>
+
+      <!-- Reviewer action banner: escalated -->
       <div v-else-if="task.status === 'escalated'" class="rounded-lg border border-severity-critical bg-severity-critical-muted p-4 mb-4">
         <div class="flex items-center gap-2 mb-1">
           <span class="font-medium text-severity-critical-foreground text-sm">Escalated — Manual Review Needed</span>
         </div>
-        <p class="text-xs text-muted-foreground">Max review iterations reached. The findings below could not be auto-resolved and require human intervention.</p>
+        <p class="text-xs text-muted-foreground mb-3">Max review iterations reached. The findings below could not be auto-resolved and require human intervention.</p>
+        <div class="flex items-center gap-2">
+          <button
+            v-if="canRequestReReview(task)"
+            class="rounded-md border border-severity-critical-foreground text-severity-critical-foreground px-3 py-1.5 text-xs font-medium hover:bg-severity-critical-muted/50 transition-colors disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            :disabled="reReviewLoading"
+            @click="handleReReview"
+          >
+            {{ reReviewLoading ? 'Requesting...' : 'Force Re-review' }}
+          </button>
+        </div>
+        <p v-if="reReviewError" class="mt-2 text-xs text-destructive">{{ reReviewError }}</p>
       </div>
 
       <!-- Needs input form -->
@@ -94,6 +153,30 @@ const events = computed(() => eventsData.value?.events ?? [])
         <h2 class="text-sm font-medium mb-2">Review Findings</h2>
         <p v-if="task.status === 'review_fail' || task.status === 'escalated'" class="text-sm text-muted-foreground mb-2">{{ getReviewCardSummary(task) }}</p>
         <FindingsPanel :findings="task.structuredFindings" />
+      </div>
+
+      <!-- Review iteration history (diff summary) -->
+      <div v-if="reviewDiffEvents.length > 1" class="rounded-lg border p-4 mb-4">
+        <h2 class="text-sm font-medium mb-2">Review Iteration History</h2>
+        <div class="space-y-2">
+          <div v-for="(evt, idx) in reviewDiffEvents" :key="evt.id" class="flex items-center gap-2 text-xs">
+            <span class="rounded-full w-5 h-5 flex items-center justify-center text-[10px] font-medium bg-muted text-muted-foreground">
+              {{ idx + 1 }}
+            </span>
+            <span
+              class="rounded-full px-2 py-0.5 font-medium"
+              :class="{
+                'bg-success-muted text-success-muted-foreground': evt.status === 'review_pass',
+                'bg-severity-major-muted text-severity-major-foreground': evt.status === 'review_fail',
+                'bg-severity-critical-muted text-severity-critical-foreground': evt.status === 'escalated',
+              }"
+            >
+              {{ evt.status === 'review_pass' ? 'Passed' : evt.status === 'escalated' ? 'Escalated' : 'Failed' }}
+            </span>
+            <span class="text-muted-foreground">{{ evt.message }}</span>
+            <span class="text-muted-foreground/70 ml-auto">{{ formatRelativeTime(evt.createdAt) }}</span>
+          </div>
+        </div>
       </div>
 
       <!-- Timeline -->
