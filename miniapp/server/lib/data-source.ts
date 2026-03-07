@@ -38,6 +38,35 @@ export interface ListTasksResult {
   total: number
   /** Present in orch mode when no list endpoint is available */
   notice?: string
+  /** Count of tasks that failed to fetch (non-404 errors) in orch mode */
+  fetchErrors?: number
+}
+
+/** Max concurrent orch-api fetches during list assembly */
+const LIST_FETCH_CONCURRENCY = 10
+
+async function fetchWithConcurrencyLimit<T>(
+  items: string[],
+  fn: (id: string) => Promise<T>,
+  limit: number,
+): Promise<PromiseSettledResult<T>[]> {
+  const results: PromiseSettledResult<T>[] = new Array(items.length)
+  let cursor = 0
+
+  async function worker() {
+    while (cursor < items.length) {
+      const idx = cursor++
+      try {
+        results[idx] = { status: 'fulfilled', value: await fn(items[idx]) }
+      } catch (reason) {
+        results[idx] = { status: 'rejected', reason }
+      }
+    }
+  }
+
+  const workers = Array.from({ length: Math.min(limit, items.length) }, () => worker())
+  await Promise.all(workers)
+  return results
 }
 
 export async function listTasks(opts: ListTasksOptions): Promise<ListTasksResult> {
@@ -60,28 +89,35 @@ export async function listTasks(opts: ListTasksOptions): Promise<ListTasksResult
 
   const ids = getKnownTaskIds()
   const results: Task[] = []
+  let fetchErrors = 0
 
-  // Fetch each known task; drop 404s from cache
-  const settled = await Promise.allSettled(
-    ids.map(async (id) => {
-      try {
-        const orch = await orchGetTask(id)
-        return mapOrchTask(orch)
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err)
-        if (msg.includes('404')) {
-          removeTaskId(id)
-        }
-        return null
-      }
-    })
+  // Fetch each known task with concurrency limit; drop 404s from cache
+  const settled = await fetchWithConcurrencyLimit(
+    ids,
+    async (id) => {
+      const orch = await orchGetTask(id)
+      return mapOrchTask(orch)
+    },
+    LIST_FETCH_CONCURRENCY,
   )
 
-  for (const s of settled) {
-    if (s.status === 'fulfilled' && s.value) {
+  for (let i = 0; i < settled.length; i++) {
+    const s = settled[i]
+    if (s.status === 'fulfilled') {
       results.push(s.value)
+    } else {
+      const msg = s.reason instanceof Error ? s.reason.message : String(s.reason)
+      if (msg.includes('404')) {
+        removeTaskId(ids[i])
+      } else {
+        fetchErrors++
+        log('warn', 'listTasks fetch error', { taskId: ids[i], error: msg })
+      }
     }
   }
+
+  // Sort by updatedAt descending for deterministic ordering
+  results.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
 
   let tasks = results
   if (opts.statusFilter?.length) {
@@ -91,6 +127,7 @@ export async function listTasks(opts: ListTasksOptions): Promise<ListTasksResult
   return {
     tasks,
     total: tasks.length,
+    ...(fetchErrors > 0 ? { fetchErrors } : {}),
     notice: 'List assembled from local task cache. Full listing requires GET /api/tasks (not yet available in orch-api v0.3.0).',
   }
 }
@@ -226,6 +263,54 @@ export async function getTaskEvents(taskId: string, userId: number): Promise<Tas
     const orch = await orchGetTask(taskId)
     trackTaskId(taskId)
     return mapOrchEvents(orch)
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err)
+    if (msg.includes('404')) return null
+    throw err
+  }
+}
+
+// ── REQUEST RE-REVIEW ─────────────────────────────────────────────────────
+
+export interface ReReviewResult {
+  ok: boolean
+  task: Task
+}
+
+export async function requestReReview(taskId: string, userId: number): Promise<ReReviewResult | null> {
+  if (!isOrch()) {
+    const task = mockTasks.find(t => t.id === taskId)
+    if (!task || task.userId !== userId) return null
+
+    if (task.status !== 'review_fail' && task.status !== 'escalated') {
+      throw new Error('task_not_eligible_for_rereview')
+    }
+
+    // Mock: transition to running (simulates re-review being queued)
+    task.status = 'running'
+    task.internalStatus = 'progress'
+    task.message = 'Re-review requested'
+    task.updatedAt = new Date().toISOString()
+    return { ok: true, task }
+  }
+
+  // Orch mode: verify eligibility, then POST re-review request
+  try {
+    const orch = await orchGetTask(taskId)
+    trackTaskId(taskId)
+
+    if (orch.status !== 'review_fail' && orch.status !== 'escalated') {
+      throw new Error('task_not_eligible_for_rereview')
+    }
+
+    // Forward to orch API re-review endpoint
+    const res = await orchResumeTask(taskId, '__rereview__')
+    if (!res.ok) {
+      throw new Error('orch re-review returned ok:false')
+    }
+
+    const updated = await orchGetTask(taskId)
+    return { ok: true, task: mapOrchTask(updated) }
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err)
     if (msg.includes('404')) return null

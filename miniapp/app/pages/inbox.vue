@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { useTasksList } from '~/composables/useTasks'
-import { formatRelativeTime } from '~/lib/mappers'
+import { truncateId, formatRelativeTime } from '~/lib/mappers'
 
 const { data, isPending, error, refetch } = useTasksList({ status: 'needs_input' })
 const tasks = computed(() => data.value?.tasks ?? [])
@@ -23,14 +23,14 @@ const tasks = computed(() => data.value?.tasks ?? [])
       <div v-for="task in tasks" :key="task.id" class="rounded-lg border p-4">
         <div class="flex items-center justify-between mb-2">
           <NuxtLink :to="`/tasks/${task.id}`" class="font-mono text-sm text-info hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded">
-            {{ task.id }}
+            {{ truncateId(task.id) }}
           </NuxtLink>
-          <span v-if="task.needsInputAt" class="text-xs text-muted-foreground">
-            waiting {{ formatRelativeTime(task.needsInputAt) }}
+          <span class="text-xs text-muted-foreground">
+            waiting {{ formatRelativeTime(task.needsInputAt ?? task.updatedAt) }}
           </span>
         </div>
         <ResumeForm
-          v-if="task.question"
+          v-if="task.status === 'needs_input' && task.question"
           :task-id="task.id"
           :question="task.question"
           :options="task.options"

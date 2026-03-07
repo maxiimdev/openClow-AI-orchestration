@@ -189,6 +189,74 @@ describe('SSEClient', () => {
     vi.useRealTimers()
   })
 
+  it('recovers from polling mode after pollingRecoveryMs', async () => {
+    vi.useFakeTimers()
+    const states: SSEState[] = []
+    const client = new SSEClient({
+      url: '/stream',
+      getTicket: mockGetTicket,
+      onMessage: () => {},
+      onStateChange: (s) => states.push(s),
+      maxRetries: 0, // fail immediately to polling
+      pollingRecoveryMs: 5000,
+    })
+
+    await client.connect()
+    MockEventSource.instances[0].simulateError()
+    expect(states[states.length - 1]).toBe('polling')
+
+    // After pollingRecoveryMs, should retry SSE connection
+    await vi.advanceTimersByTimeAsync(5000)
+    const recoveryInstance = MockEventSource.instances[MockEventSource.instances.length - 1]
+    expect(recoveryInstance).toBeDefined()
+    expect(recoveryInstance.closed).toBe(false)
+
+    // Simulate successful reconnection
+    recoveryInstance.simulateOpen()
+    expect(states[states.length - 1]).toBe('connected')
+
+    vi.useRealTimers()
+  })
+
+  it('does not attempt recovery after disconnect', async () => {
+    vi.useFakeTimers()
+    const client = new SSEClient({
+      url: '/stream',
+      getTicket: mockGetTicket,
+      onMessage: () => {},
+      maxRetries: 0,
+      pollingRecoveryMs: 1000,
+    })
+
+    await client.connect()
+    MockEventSource.instances[0].simulateError() // enters polling
+    const countBefore = MockEventSource.instances.length
+    client.disconnect()
+    await vi.advanceTimersByTimeAsync(2000) // recovery timer fires but should be cleared
+    expect(MockEventSource.instances.length).toBe(countBefore) // no new EventSource
+
+    vi.useRealTimers()
+  })
+
+  it('disables polling recovery when pollingRecoveryMs is 0', async () => {
+    vi.useFakeTimers()
+    const client = new SSEClient({
+      url: '/stream',
+      getTicket: mockGetTicket,
+      onMessage: () => {},
+      maxRetries: 0,
+      pollingRecoveryMs: 0,
+    })
+
+    await client.connect()
+    MockEventSource.instances[0].simulateError()
+    const countAfterPolling = MockEventSource.instances.length
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(MockEventSource.instances.length).toBe(countAfterPolling)
+
+    vi.useRealTimers()
+  })
+
   it('falls back to polling when getTicket fails', async () => {
     const states: SSEState[] = []
     let ticketCallCount = 0

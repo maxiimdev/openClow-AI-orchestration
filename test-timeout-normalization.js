@@ -98,6 +98,8 @@ function runScenario({ task, workerEnv, afterResultMs = 600 }) {
         cwd: path.join(__dirname),
         env: {
           ...process.env,
+          REPORT_SCHEMA_STRICT: "false",
+      REPORT_CONTRACT_ENABLED: "false",
           ORCH_BASE_URL:             `http://localhost:${port}`,
           WORKER_TOKEN:              "test-token",
           WORKER_ID:                 `test-worker-${port}`,

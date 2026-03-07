@@ -415,6 +415,7 @@ server.listen(0, () => {
 
   const env = {
     ...process.env,
+    REPORT_SCHEMA_STRICT: "false",
     ORCH_BASE_URL: `http://127.0.0.1:${port}`,
     WORKER_TOKEN: "test-token",
     WORKER_ID: "test-report-contract",

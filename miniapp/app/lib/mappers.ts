@@ -68,8 +68,9 @@ export function getStatusColor(status: UserStatus): string {
 }
 
 export function formatRelativeTime(isoDate: string): string {
-  const now = Date.now()
   const then = new Date(isoDate).getTime()
+  if (isNaN(then) || then <= 0) return 'unknown'
+  const now = Date.now()
   const diffMs = now - then
   const diffSec = Math.floor(diffMs / 1000)
 

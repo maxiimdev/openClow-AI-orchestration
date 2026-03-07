@@ -15,6 +15,8 @@ export interface SSEClientOptions {
   onResetRequired?: () => void
   onStateChange?: (state: SSEState) => void
   maxRetries?: number
+  /** Interval (ms) to periodically retry SSE after falling back to polling (default 60000) */
+  pollingRecoveryMs?: number
 }
 
 export type SSEState = 'connected' | 'reconnecting' | 'disconnected' | 'polling'
@@ -23,13 +25,14 @@ export class SSEClient {
   private es: EventSource | null = null
   private retryCount = 0
   private retryTimer: ReturnType<typeof setTimeout> | null = null
+  private recoveryTimer: ReturnType<typeof setTimeout> | null = null
   private lastEventId = ''
   private opts: Required<SSEClientOptions>
   private _state: SSEState = 'disconnected'
   private disposed = false
 
   constructor(opts: SSEClientOptions) {
-    this.opts = { maxRetries: 3, onHeartbeat: () => {}, onResetRequired: () => {}, onStateChange: () => {}, ...opts }
+    this.opts = { maxRetries: 3, pollingRecoveryMs: 60_000, onHeartbeat: () => {}, onResetRequired: () => {}, onStateChange: () => {}, ...opts }
   }
 
   get state() { return this._state }
@@ -46,7 +49,7 @@ export class SSEClient {
       // Ticket fetch failed — treat as connection error
       this.retryCount++
       if (this.retryCount > this.opts.maxRetries) {
-        this.setState('polling')
+        this.enterPollingMode()
         return
       }
       this.setState('reconnecting')
@@ -89,7 +92,7 @@ export class SSEClient {
       this.cleanup()
       this.retryCount++
       if (this.retryCount > this.opts.maxRetries) {
-        this.setState('polling')
+        this.enterPollingMode()
         return
       }
       this.setState('reconnecting')
@@ -104,6 +107,17 @@ export class SSEClient {
     this.setState('disconnected')
   }
 
+  /** Enter polling fallback with periodic SSE recovery attempts */
+  private enterPollingMode() {
+    this.setState('polling')
+    if (this.disposed || this.opts.pollingRecoveryMs <= 0) return
+    this.recoveryTimer = setTimeout(() => {
+      if (this.disposed) return
+      this.retryCount = 0
+      this.connect()
+    }, this.opts.pollingRecoveryMs)
+  }
+
   private cleanup() {
     if (this.es) {
       this.es.close()
@@ -112,6 +126,10 @@ export class SSEClient {
     if (this.retryTimer) {
       clearTimeout(this.retryTimer)
       this.retryTimer = null
+    }
+    if (this.recoveryTimer) {
+      clearTimeout(this.recoveryTimer)
+      this.recoveryTimer = null
     }
   }
 

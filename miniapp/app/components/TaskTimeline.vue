@@ -30,7 +30,7 @@ function getDotClass(status: string) {
       <div class="flex-1 pb-2">
         <div class="flex items-center gap-2">
           <span class="text-sm font-medium">{{ getStatusLabel(mapWorkerStatus(event.status as any)) }}</span>
-          <span class="text-xs text-muted-foreground">{{ event.phase }}</span>
+          <span v-if="event.phase" class="text-xs text-muted-foreground capitalize">{{ event.phase.replace(/_/g, ' ') }}</span>
           <span class="ml-auto text-xs text-muted-foreground">{{ formatRelativeTime(event.createdAt) }}</span>
         </div>
         <p v-if="event.message" class="text-sm text-muted-foreground mt-0.5">{{ event.message }}</p>
