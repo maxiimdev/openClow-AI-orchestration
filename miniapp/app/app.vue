@@ -1,13 +1,32 @@
 <script setup lang="ts">
 import { useAuthStore } from '~/stores/auth'
+import { useAuth } from '~/composables/useAuth'
 import { useSSE } from '~/composables/useSSE'
 
-const auth = useAuthStore()
+const authStore = useAuthStore()
+const { login } = useAuth()
 const sse = useSSE()
 
-onMounted(() => {
-  auth.restoreFromStorage()
-  if (auth.isAuthenticated) {
+onMounted(async () => {
+  // Default to dark theme (shadcn convention: class on <html>)
+  document.documentElement.classList.add('dark')
+
+  authStore.restoreFromStorage()
+
+  // Auto-login via Telegram WebApp initData when no valid token is stored
+  if (!authStore.isAuthenticated) {
+    const tg = (window as Record<string, unknown>).Telegram as
+      | { WebApp?: { initData?: string } }
+      | undefined
+    const initData = tg?.WebApp?.initData
+    if (initData) {
+      try {
+        await login(initData)
+      } catch { /* auth will be retried on 401 via api.ts interceptor */ }
+    }
+  }
+
+  if (authStore.isAuthenticated) {
     sse.connect()
   }
 })

@@ -1,15 +1,29 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
 
 // ---------------------------------------------------------------------------
-// Config — reads from env, falls back to dev-only defaults
+// Config — reads from Nuxt runtimeConfig (set via NUXT_MINIAPP_JWT_SECRET /
+// NUXT_TELEGRAM_BOT_TOKEN env vars, or nuxt.config.ts defaults).
+// Falls back to process.env for non-Nuxt test harnesses.
 // ---------------------------------------------------------------------------
 
-function getEnv(key: string, fallback: string): string {
-  return process.env[key] || fallback
+function getBotToken(): string {
+  try {
+    const cfg = useRuntimeConfig()
+    if (cfg.telegramBotToken) return cfg.telegramBotToken as string
+  } catch { /* outside Nitro runtime — fall back */ }
+  return process.env.TELEGRAM_BOT_TOKEN || process.env.NUXT_TELEGRAM_BOT_TOKEN || ''
 }
 
-const BOT_TOKEN = () => getEnv('TELEGRAM_BOT_TOKEN', '')
-const JWT_SECRET = () => getEnv('MINIAPP_JWT_SECRET', 'dev-jwt-secret-do-not-use-in-prod')
+function getJwtSecret(): string {
+  try {
+    const cfg = useRuntimeConfig()
+    if (cfg.miniappJwtSecret) return cfg.miniappJwtSecret as string
+  } catch { /* outside Nitro runtime — fall back */ }
+  return process.env.MINIAPP_JWT_SECRET || process.env.NUXT_MINIAPP_JWT_SECRET || 'dev-jwt-secret-do-not-use-in-prod'
+}
+
+const BOT_TOKEN = () => getBotToken()
+const JWT_SECRET = () => getJwtSecret()
 const TOKEN_TTL_S = 86400 // 24 h
 const TICKET_TTL_MS = 30_000 // 30 s
 

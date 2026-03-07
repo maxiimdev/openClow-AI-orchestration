@@ -7,6 +7,43 @@ function getToken(): string | null {
   return localStorage.getItem('miniapp_token')
 }
 
+function clearStoredAuth() {
+  if (import.meta.client) {
+    localStorage.removeItem('miniapp_token')
+    localStorage.removeItem('miniapp_user')
+  }
+}
+
+/**
+ * Try to obtain a fresh token via Telegram WebApp initData.
+ * Returns the new token on success, null otherwise.
+ */
+async function tryAutoLogin(): Promise<string | null> {
+  if (import.meta.server) return null
+  const tg = (window as Record<string, unknown>).Telegram as
+    | { WebApp?: { initData?: string } }
+    | undefined
+  const initData = tg?.WebApp?.initData
+  if (!initData) return null
+
+  try {
+    const res = await fetch(`${BASE}/auth/telegram`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ initData }),
+    })
+    if (!res.ok) return null
+    const data: AuthResponse = await res.json()
+    localStorage.setItem('miniapp_token', data.token)
+    localStorage.setItem('miniapp_user', JSON.stringify(data.user))
+    return data.token
+  } catch {
+    return null
+  }
+}
+
+let _autoLoginPromise: Promise<string | null> | null = null
+
 async function apiFetch<T>(path: string, opts: RequestInit = {}): Promise<T> {
   const token = getToken()
   const headers: Record<string, string> = {
@@ -16,6 +53,29 @@ async function apiFetch<T>(path: string, opts: RequestInit = {}): Promise<T> {
   if (token) headers['Authorization'] = `Bearer ${token}`
 
   const res = await fetch(`${BASE}${path}`, { ...opts, headers })
+
+  // On 401, attempt auto-login once and retry
+  if (res.status === 401 && import.meta.client) {
+    clearStoredAuth()
+    // Deduplicate concurrent auto-login attempts
+    if (!_autoLoginPromise) {
+      _autoLoginPromise = tryAutoLogin().finally(() => { _autoLoginPromise = null })
+    }
+    const freshToken = await _autoLoginPromise
+    if (freshToken) {
+      headers['Authorization'] = `Bearer ${freshToken}`
+      const retry = await fetch(`${BASE}${path}`, { ...opts, headers })
+      if (!retry.ok) {
+        const body = await retry.text().catch(() => '')
+        throw new Error(`API ${retry.status}: ${body}`)
+      }
+      return retry.json()
+    }
+    // Auto-login failed — propagate original error
+    const body = await res.text().catch(() => '')
+    throw new Error(`API ${res.status}: ${body}`)
+  }
+
   if (!res.ok) {
     const body = await res.text().catch(() => '')
     throw new Error(`API ${res.status}: ${body}`)
