@@ -5,6 +5,7 @@ import { filterReviewTasks, getReviewSummary, getReviewCardSummary, countFinding
 import Card from '~/components/ui/card/Card.vue'
 import CardContent from '~/components/ui/card/CardContent.vue'
 import Badge from '~/components/ui/badge/Badge.vue'
+import Skeleton from '~/components/ui/skeleton/Skeleton.vue'
 
 const { data, isPending, error, refetch } = useTasksList()
 
@@ -39,7 +40,7 @@ const findingsByTask = computed(() => {
     <StaleIndicator />
 
     <div v-if="isPending" class="space-y-3 mt-4">
-      <div v-for="i in 3" :key="i" class="h-24 rounded-xl bg-muted animate-pulse" />
+      <Skeleton v-for="i in 3" :key="i" class="h-24 rounded-xl" />
     </div>
 
     <ErrorState v-else-if="error" :message="(error as Error).message" @retry="refetch()" />
@@ -79,13 +80,13 @@ const findingsByTask = computed(() => {
               <!-- Severity breakdown for tasks with structured findings -->
               <div v-if="findingsByTask[task.id]" class="mt-2 flex gap-1.5">
                 <template v-for="(count, sev) in findingsByTask[task.id]" :key="sev">
-                  <span
+                  <Badge
                     v-if="count > 0"
-                    class="rounded-full px-2 py-0.5 text-xs font-medium"
-                    :class="severityClass[sev]"
+                    variant="secondary"
+                    :class="[severityClass[sev], 'border-transparent']"
                   >
                     {{ count }} {{ sev }}
-                  </span>
+                  </Badge>
                 </template>
               </div>
 

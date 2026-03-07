@@ -5,6 +5,7 @@ import { getStatusLabel } from '~/lib/mappers'
 import type { UserStatus } from '~/lib/types'
 import Input from '~/components/ui/input/Input.vue'
 import Button from '~/components/ui/button/Button.vue'
+import Skeleton from '~/components/ui/skeleton/Skeleton.vue'
 
 const statusFilter = ref<UserStatus | ''>('')
 const searchQuery = ref('')
@@ -45,7 +46,7 @@ const statuses: (UserStatus | '')[] = ['', 'running', 'at_risk', 'completed', 'f
     </div>
 
     <div v-if="isPending" class="space-y-3 mt-4">
-      <div v-for="i in 5" :key="i" class="h-20 rounded-xl bg-muted animate-pulse" />
+      <Skeleton v-for="i in 5" :key="i" class="h-20 rounded-xl" />
     </div>
 
     <ErrorState v-else-if="error" :message="(error as Error).message" @retry="refetch()" />

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { useAuthStore } from '~/stores/auth'
 import { useSSE } from '~/composables/useSSE'
+import Separator from '~/components/ui/separator/Separator.vue'
 
 const authStore = useAuthStore()
 const sse = useSSE()
@@ -43,16 +44,27 @@ onUnmounted(() => {
 
 <template>
   <div class="min-h-screen bg-background text-foreground">
-    <nav aria-label="Main navigation" class="border-b border-border px-4 py-2">
-      <div class="flex items-center justify-between">
-        <NuxtLink to="/" class="text-lg font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded">Worker</NuxtLink>
-        <div class="flex gap-3 text-sm">
-          <NuxtLink to="/tasks" class="text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded px-1">Tasks</NuxtLink>
-          <NuxtLink to="/inbox" class="text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded px-1">Inbox</NuxtLink>
-          <NuxtLink to="/reviews" class="text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded px-1">Reviews</NuxtLink>
+    <nav aria-label="Main navigation" class="sticky top-0 z-50 bg-background/80 backdrop-blur-lg supports-[backdrop-filter]:bg-background/60">
+      <div class="flex h-14 items-center justify-between px-4 max-w-screen-lg mx-auto">
+        <NuxtLink to="/" class="text-base font-semibold tracking-tight focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded">
+          <span class="text-foreground">Worker</span>
+        </NuxtLink>
+        <div class="flex items-center gap-1">
+          <NuxtLink
+            v-for="link in [{ to: '/tasks', label: 'Tasks' }, { to: '/inbox', label: 'Inbox' }, { to: '/reviews', label: 'Reviews' }]"
+            :key="link.to"
+            :to="link.to"
+            class="relative px-3 py-1.5 text-sm font-medium text-muted-foreground hover:text-foreground rounded-md hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            active-class="!text-foreground bg-accent"
+          >
+            {{ link.label }}
+          </NuxtLink>
         </div>
       </div>
     </nav>
-    <NuxtPage />
+    <Separator />
+    <main class="max-w-screen-lg mx-auto">
+      <NuxtPage />
+    </main>
   </div>
 </template>
