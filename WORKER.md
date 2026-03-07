@@ -40,10 +40,16 @@ When `REPORT_SCHEMA_STRICT=true`, reports are validated against structured schem
 |---|---|---|
 | `strict` | Task instructions match: audit, foundation, hardening, refactor, migration | changelog, evidence/commands, test summary, commit hash |
 | `standard` | `REPORT_SCHEMA_STRICT=true` and no strict pattern match | changelog, test summary |
+| `proof` | `task.mergeRun === true` (regardless of `REPORT_SCHEMA_STRICT`) | evidence/commands, commit hash |
 | `compact` | Never auto-selected (explicit `reportSchema=compact` override only) | *(none)* |
 
-Per-task overrides: `task.reportSchema = "compact" | "standard" | "strict"` overrides auto-detection.
+Per-task overrides: `task.reportSchema = "compact" | "standard" | "strict" | "proof"` overrides auto-detection.
 Per-task opt-out: `task.reportSchemaRetryOnViolation = false` disables schema retry for that task.
+
+**`mergeRun` flag**: Set `task.mergeRun = true` for tasks whose goal is to merge a PR rather than
+implement code. These tasks use the `proof` schema — `changelog` and `tests` sections are not
+required (there is no code-change delta or test run to report), but `evidence` (e.g. `gh pr merge`
+output) and `commit` (the merge commit hash) must be present to confirm the merge succeeded.
 
 On schema violation: emits `report_schema_invalid` event with missing sections. If the **only** missing sections are `tests` and/or `commit`, attempts deterministic auto-repair by scanning raw stdout for test output and commit hashes. On successful repair: emits `report_schema_repaired` event and keeps `completed` status. If auto-repair fails or missing sections include non-repairable keys (e.g. `changelog`, `evidence`): performs one retry if enabled, fails with `report_contract_violation` if still invalid.
 
@@ -155,6 +161,7 @@ Claude exits with a non-zero code.
 | `orchestratedLoop` | boolean | Enable full orchestrated loop (any mode). Runs implement → review → [patch → re-review]* until pass or `maxReviewIterations`. |
 | `maxReviewIterations` | number | Override max iterations for `reviewLoop`/`orchestratedLoop` (default: `REVIEW_MAX_ITERATIONS`). |
 | `patchInstructions` | string | Custom instructions for patch runs in loops. Defaults to a generated prompt based on `instructions`. |
+| `mergeRun` | boolean | Mark task as a PR-merge operation. Applies `proof` schema (requires evidence + commit; skips changelog/tests). |
 
 ## Stage gates
 
