@@ -179,6 +179,18 @@ describe('mapOrchTask', () => {
     expect(task.status).toBe('running')
   })
 
+  // ── Validation guards ──
+
+  it('throws when taskId is missing', () => {
+    expect(() => mapOrchTask({ ...baseOrch, taskId: '' }))
+      .toThrow('taskId is required')
+  })
+
+  it('throws when mode is missing', () => {
+    expect(() => mapOrchTask({ ...baseOrch, mode: '' }))
+      .toThrow('mode is required')
+  })
+
   // ── v2 result contract tests ──
 
   it('passes through resultVersion when present', () => {

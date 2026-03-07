@@ -179,6 +179,46 @@ describe('data-source (orch mode)', () => {
       const { getKnownTaskIds } = await import('../server/lib/task-cache')
       expect(getKnownTaskIds()).not.toContain('gone-task')
     })
+
+    it('reports fetchErrors for non-404 failures', async () => {
+      trackTaskId('ok-task')
+      trackTaskId('err-task')
+      mockOrchGetTask
+        .mockResolvedValueOnce(sampleOrchTask)
+        .mockRejectedValueOnce(new Error('orch-api 500: internal'))
+
+      const result = await listTasks({ userId: 1 })
+      expect(result.tasks).toHaveLength(1)
+      expect(result.fetchErrors).toBe(1)
+    })
+
+    it('sorts results by updatedAt descending', async () => {
+      trackTaskId('old-task')
+      trackTaskId('new-task')
+      mockOrchGetTask
+        .mockResolvedValueOnce({
+          ...sampleOrchTask,
+          taskId: 'old-task',
+          updatedAt: '2025-01-01T00:00:00Z',
+        })
+        .mockResolvedValueOnce({
+          ...sampleOrchTask,
+          taskId: 'new-task',
+          updatedAt: '2025-06-01T00:00:00Z',
+        })
+
+      const result = await listTasks({ userId: 1 })
+      expect(result.tasks[0].id).toBe('new-task')
+      expect(result.tasks[1].id).toBe('old-task')
+    })
+
+    it('does not include fetchErrors when all succeed', async () => {
+      trackTaskId('ok-task')
+      mockOrchGetTask.mockResolvedValue(sampleOrchTask)
+
+      const result = await listTasks({ userId: 1 })
+      expect(result.fetchErrors).toBeUndefined()
+    })
   })
 
   describe('resumeTask', () => {

@@ -22,9 +22,13 @@ export function useSSE() {
         return ticket
       },
       onMessage: (msg: SSEMessage) => {
+        connStore.markDataReceived()
         qc.invalidateQueries({ queryKey: ['task', msg.taskId] })
         qc.invalidateQueries({ queryKey: ['task-events', msg.taskId] })
         qc.invalidateQueries({ queryKey: ['tasks'] })
+      },
+      onHeartbeat: () => {
+        connStore.markDataReceived()
       },
       onResetRequired: () => {
         qc.invalidateQueries()

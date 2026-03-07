@@ -52,6 +52,9 @@ function fallbackTimestamp(orch: OrchTask): string {
  * ownership (e.g., via `createdBy`), this mapper should read it.
  */
 export function mapOrchTask(orch: OrchTask): Task {
+  if (!orch.taskId) throw new Error('orch-mapper: taskId is required')
+  if (!orch.mode) throw new Error('orch-mapper: mode is required')
+
   const userStatus = mapStatus(orch.status)
 
   const task: Task = {
