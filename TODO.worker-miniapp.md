@@ -1,7 +1,7 @@
 # TODO — Worker hardening + Mini App (2026-03-05)
 
 Owner: maxxim + bratok
-Status: active
+Status: active (⚠️ checklist stale; see PLAN_SYNC.md for current truth)
 
 ## North Star (на ближайшие сутки)
 
