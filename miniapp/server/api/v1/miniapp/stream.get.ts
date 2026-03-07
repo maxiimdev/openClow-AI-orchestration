@@ -1,5 +1,6 @@
 import { redeemTicket } from '../../../lib/crypto'
 import { mockTasks } from '../../../lib/mock-data'
+import { recordSSEConnect, recordSSEDisconnect } from '../../../lib/health-telemetry'
 
 let eventCounter = 100
 
@@ -25,6 +26,8 @@ export default defineEventHandler((event) => {
     'Cache-Control': 'no-cache',
     'Connection': 'keep-alive',
   })
+
+  recordSSEConnect()
 
   // Send initial heartbeat
   res.write(`event: heartbeat\ndata: {"ts":"${new Date().toISOString()}"}\n\n`)
@@ -55,5 +58,6 @@ export default defineEventHandler((event) => {
   event.node.req.on('close', () => {
     clearInterval(updateInterval)
     clearInterval(heartbeatInterval)
+    recordSSEDisconnect()
   })
 })
