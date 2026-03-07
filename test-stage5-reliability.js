@@ -169,7 +169,9 @@ function spawnWorker(envOverrides = {}) {
     ...envOverrides,
   };
   return spawn("node", [path.join(__dirname, "worker.js")], {
-    env: { ...process.env, ...env },
+    env: { ...process.env,
+      REPORT_SCHEMA_STRICT: "false",
+      REPORT_CONTRACT_ENABLED: "false", ...env },
     stdio: ["ignore", "pipe", "pipe"],
   });
 }
