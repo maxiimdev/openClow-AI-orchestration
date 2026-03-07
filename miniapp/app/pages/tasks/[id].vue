@@ -10,6 +10,7 @@ import CardHeader from '~/components/ui/card/CardHeader.vue'
 import Badge from '~/components/ui/badge/Badge.vue'
 import Button from '~/components/ui/button/Button.vue'
 import Skeleton from '~/components/ui/skeleton/Skeleton.vue'
+import Separator from '~/components/ui/separator/Separator.vue'
 import { ArrowLeft, GitBranch, Clock, Terminal, AlertTriangle, ShieldAlert } from 'lucide-vue-next'
 
 const route = useRoute()
@@ -50,13 +51,13 @@ const reviewDiffEvents = computed(() => {
 <template>
   <div class="p-4 sm:p-6">
     <StaleIndicator class="mb-3" />
-    <NuxtLink to="/tasks" class="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground mb-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded">
+    <NuxtLink to="/tasks" class="inline-flex items-center gap-1.5 text-[0.8125rem] font-medium text-muted-foreground hover:text-foreground mb-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded">
       <ArrowLeft class="h-3.5 w-3.5" />
-      Tasks
+      Back to Tasks
     </NuxtLink>
 
     <div v-if="taskPending" class="space-y-4">
-      <Skeleton class="h-32 rounded-xl" />
+      <Skeleton class="h-36 rounded-xl" />
       <Skeleton class="h-64 rounded-xl" />
     </div>
 
@@ -79,7 +80,8 @@ const reviewDiffEvents = computed(() => {
             </span>
           </div>
           <p v-if="task.message" class="mt-3 text-sm text-muted-foreground leading-relaxed">{{ task.message }}</p>
-          <div class="mt-3 flex items-center gap-4 text-xs text-muted-foreground">
+          <Separator class="my-3" />
+          <div class="flex items-center gap-4 text-xs text-muted-foreground">
             <span class="inline-flex items-center gap-1">
               <Clock class="h-3 w-3" />
               Created {{ formatRelativeTime(task.createdAt) }}
@@ -173,19 +175,19 @@ const reviewDiffEvents = computed(() => {
         <CardHeader class="pb-2">
           <div class="flex items-center gap-2">
             <Terminal class="h-4 w-4 text-muted-foreground" />
-            <h2 class="text-sm font-medium">Result</h2>
+            <h2 class="text-sm font-semibold">Result</h2>
           </div>
         </CardHeader>
         <CardContent>
           <div class="flex items-center gap-3 text-sm">
-            <span :class="task.result.exitCode === 0 ? 'text-success' : 'text-destructive'" class="font-mono font-medium">
-              exit {{ task.result.exitCode }}
-            </span>
-            <span v-if="task.result.durationMs > 0" class="text-muted-foreground">{{ (task.result.durationMs / 1000).toFixed(1) }}s</span>
+            <Badge :variant="task.result.exitCode === 0 ? 'secondary' : 'destructive'" :class="task.result.exitCode === 0 ? 'bg-success-muted text-success-muted-foreground border-transparent' : ''">
+              <span class="font-mono">exit {{ task.result.exitCode }}</span>
+            </Badge>
+            <span v-if="task.result.durationMs > 0" class="text-muted-foreground text-xs">{{ (task.result.durationMs / 1000).toFixed(1) }}s</span>
             <span v-if="task.result.truncated" class="text-warning text-xs">(truncated)</span>
           </div>
-          <pre v-if="task.result.stdout" class="mt-3 text-xs bg-muted/50 border border-border rounded-lg p-3 overflow-x-auto max-h-48 overflow-y-auto">{{ task.result.stdout }}</pre>
-          <pre v-if="task.result.stderr" class="mt-2 text-xs bg-severity-critical-muted border border-severity-critical/20 text-severity-critical-foreground rounded-lg p-3 overflow-x-auto max-h-32 overflow-y-auto">{{ task.result.stderr }}</pre>
+          <pre v-if="task.result.stdout" class="mt-3 bg-muted/40 border border-border rounded-lg p-3 overflow-x-auto max-h-48 overflow-y-auto text-[0.8125rem]">{{ task.result.stdout }}</pre>
+          <pre v-if="task.result.stderr" class="mt-2 bg-severity-critical-muted border border-severity-critical/20 text-severity-critical-foreground rounded-lg p-3 overflow-x-auto max-h-32 overflow-y-auto text-[0.8125rem]">{{ task.result.stderr }}</pre>
         </CardContent>
       </Card>
 
@@ -201,7 +203,7 @@ const reviewDiffEvents = computed(() => {
 
       <!-- Structured findings -->
       <div v-if="task.structuredFindings?.length" class="mb-4">
-        <h2 class="text-sm font-medium mb-2">Review Findings</h2>
+        <h2 class="text-sm font-semibold mb-2">Review Findings</h2>
         <p v-if="task.status === 'review_fail' || task.status === 'escalated'" class="text-sm text-muted-foreground mb-3">{{ getReviewCardSummary(task) }}</p>
         <FindingsPanel :findings="task.structuredFindings" />
       </div>
@@ -209,7 +211,7 @@ const reviewDiffEvents = computed(() => {
       <!-- Review iteration history -->
       <Card v-if="reviewDiffEvents.length > 1" class="mb-4">
         <CardHeader class="pb-2">
-          <h2 class="text-sm font-medium">Review Iteration History</h2>
+          <h2 class="text-sm font-semibold">Review Iteration History</h2>
         </CardHeader>
         <CardContent>
           <div class="space-y-2">
@@ -237,7 +239,7 @@ const reviewDiffEvents = computed(() => {
 
       <!-- Timeline -->
       <div class="mb-4">
-        <h2 class="text-sm font-medium mb-3">Event Timeline</h2>
+        <h2 class="text-sm font-semibold mb-3">Event Timeline</h2>
         <div v-if="eventsPending" class="space-y-2">
           <Skeleton v-for="i in 5" :key="i" class="h-12 rounded-lg" />
         </div>

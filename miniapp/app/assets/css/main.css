@@ -57,19 +57,19 @@
   --color-severity-minor-muted: hsl(48 96% 89%);
   --color-severity-minor-foreground: hsl(32 80% 30%);
 
-  --radius: 0.5rem;
+  --radius: 0.625rem;
 }
 
 /* --- Dark theme (class-based, shadcn convention) --- */
 .dark {
-  --color-background: hsl(224 71% 4%);
+  --color-background: hsl(222 47% 6%);
   --color-foreground: hsl(210 40% 98%);
 
   /* Elevated card surface — slightly lighter than background */
-  --color-card: hsl(222 47% 8%);
+  --color-card: hsl(222 40% 9%);
   --color-card-foreground: hsl(210 40% 98%);
 
-  --color-popover: hsl(222 47% 8%);
+  --color-popover: hsl(222 40% 9%);
   --color-popover-foreground: hsl(210 40% 98%);
 
   --color-primary: hsl(210 40% 98%);
@@ -81,14 +81,14 @@
   --color-muted: hsl(217.2 32.6% 14%);
   --color-muted-foreground: hsl(215 20.2% 65.1%);
 
-  --color-accent: hsl(217.2 32.6% 14%);
+  --color-accent: hsl(217.2 32.6% 16%);
   --color-accent-foreground: hsl(210 40% 98%);
 
   --color-destructive: hsl(0 62.8% 30.6%);
   --color-destructive-foreground: hsl(210 40% 98%);
 
-  --color-border: hsl(217.2 32.6% 17.5%);
-  --color-input: hsl(217.2 32.6% 17.5%);
+  --color-border: hsl(217.2 28% 18%);
+  --color-input: hsl(217.2 28% 18%);
   --color-ring: hsl(212.7 26.8% 83.9%);
 
   /* Semantic status — dark variants */
@@ -102,10 +102,10 @@
   --color-warning-muted: hsl(38 50% 12%);
   --color-warning-muted-foreground: hsl(38 80% 65%);
 
-  --color-info: hsl(221 83% 53%);
+  --color-info: hsl(217 91% 60%);
   --color-info-foreground: hsl(214 100% 97%);
-  --color-info-muted: hsl(221 50% 12%);
-  --color-info-muted-foreground: hsl(221 70% 65%);
+  --color-info-muted: hsl(221 50% 14%);
+  --color-info-muted-foreground: hsl(217 80% 70%);
 
   --color-severity-critical: hsl(0 84% 60%);
   --color-severity-critical-muted: hsl(0 50% 12%);
@@ -132,11 +132,12 @@
     color: var(--color-foreground);
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+    font-feature-settings: "rlig" 1, "calt" 1;
   }
 
   /* Smooth transitions on interactive elements */
   a, button, [role="button"] {
-    transition: color 0.15s ease, background-color 0.15s ease, border-color 0.15s ease, opacity 0.15s ease;
+    transition: color 0.15s ease, background-color 0.15s ease, border-color 0.15s ease, opacity 0.15s ease, box-shadow 0.15s ease;
   }
 
   /* Custom scrollbar for dark theme */
@@ -155,7 +156,16 @@
   /* Code block styling */
   pre {
     font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
-    font-size: 0.75rem;
-    line-height: 1.5;
+    font-size: 0.8125rem;
+    line-height: 1.6;
+  }
+
+  /* Interactive card hover state */
+  .card-interactive {
+    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+  }
+  .card-interactive:hover {
+    border-color: hsl(217 28% 24%);
+    box-shadow: 0 0 0 1px hsl(217 28% 20% / 0.3);
   }
 }
