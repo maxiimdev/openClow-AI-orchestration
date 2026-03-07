@@ -67,6 +67,11 @@ const CFG = {
   reportMinLength: int("REPORT_MIN_LENGTH", 50),
   reportRetryEnabled:
     (process.env.REPORT_RETRY_ENABLED || "false").toLowerCase() === "true",
+  // Phase 5A: UI review gate
+  uiReviewEnabled:
+    (process.env.UI_REVIEW_ENABLED || "false").toLowerCase() === "true",
+  uiReviewCmd: process.env.UI_REVIEW_CMD || "./miniapp/scripts/ui-review-gate.sh",
+  uiReviewTimeoutMs: int("UI_REVIEW_TIMEOUT_MS", 120000),
   // Report schema validation (strict structured-report checks)
   reportSchemaStrict:
     (process.env.REPORT_SCHEMA_STRICT || "false").toLowerCase() === "true",
@@ -111,7 +116,7 @@ const REPORT_PLACEHOLDER_PATTERNS = [
 // Tasks with requireReviewGate flag cannot reach "completed" without review_pass.
 const VALID_TERMINAL_STATUSES = {
   dry_run:    new Set(["completed", "failed", "timeout", "rejected"]),
-  implement:  new Set(["completed", "failed", "timeout", "rejected", "needs_input", "review_pass", "escalated", "needs_patch"]),
+  implement:  new Set(["completed", "failed", "timeout", "rejected", "needs_input", "review_pass", "escalated", "needs_patch", "ui_review_pass", "ui_review_fail"]),
   review:     new Set(["review_pass", "review_fail", "failed", "timeout", "rejected", "escalated", "needs_input", "needs_patch"]),
   tests:      new Set(["completed", "failed", "timeout", "rejected"]),
 };
@@ -1634,6 +1639,45 @@ async function emitContextReset(task, phase, iteration, maxIter) {
   );
 }
 
+// ── UI REVIEW GATE ────────────────────────────────────────────────────────────
+// Runs Playwright smoke tests against the miniapp to produce a pass/fail verdict.
+async function runUiReview(task, repoPath) {
+  const cmd = CFG.uiReviewCmd;
+  const resolvedCmd = path.isAbsolute(cmd) ? cmd : path.resolve(repoPath || ".", cmd);
+  const cwd = path.dirname(resolvedCmd);
+
+  log("info", "ui_review started", { taskId: task.taskId, cmd: resolvedCmd });
+  await sendEvent(task, "progress", "ui_review", "running UI smoke tests (Playwright)");
+
+  return new Promise((resolve) => {
+    let stdout = "";
+    let stderr = "";
+    const proc = spawn(resolvedCmd, [], {
+      cwd,
+      timeout: CFG.uiReviewTimeoutMs,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    proc.stdout.on("data", (d) => { stdout += d.toString(); });
+    proc.stderr.on("data", (d) => { stderr += d.toString(); });
+
+    proc.on("error", (err) => {
+      log("error", "ui_review spawn error", { taskId: task.taskId, err: err.message });
+      resolve({ passed: false, exitCode: -1, report: "UI review failed to start: " + err.message, stdout: "", stderr: err.message, artifacts: [] });
+    });
+
+    proc.on("close", (code) => {
+      const passed = code === 0;
+      const artifacts = [];
+      const artifactRe = /artifact:\s*(.+)/gi;
+      let m;
+      while ((m = artifactRe.exec(stdout)) !== null) { artifacts.push(m[1].trim()); }
+      log("info", "ui_review finished", { taskId: task.taskId, passed, exitCode: code, artifactCount: artifacts.length });
+      resolve({ passed, exitCode: code, report: stdout.slice(-4096), stdout: stdout.slice(-8192), stderr: stderr.slice(-4096), artifacts });
+    });
+  });
+}
+
 // Full orchestrated loop: implement (fresh) → review (fresh) →
 //   (if fail) patch (fresh) → re-review (fresh) → … until pass or max iterations → escalated.
 // Each Claude invocation is a fully independent subprocess with no session carryover.
@@ -1753,15 +1797,37 @@ async function runOrchestratedLoop(task, stepCtx) {
 
     if (rv.verdict === "pass") {
       log("info", "orchestrated_loop: passed", { taskId: task.taskId, iter });
+
+      // ── UI REVIEW GATE (Phase 5A) in orchestrated loop ──
+      if (task.uiReview && CFG.uiReviewEnabled) {
+        const repoPath = task.scope?.repoPath || ".";
+        const uir = await runUiReview(task, repoPath);
+        await sendEvent(task, uir.passed ? "ui_review_pass" : "ui_review_fail", "ui_review",
+          uir.passed ? "UI smoke tests passed" : "UI smoke tests failed",
+          { uiReviewPassed: uir.passed, uiReviewExitCode: uir.exitCode, uiReviewArtifacts: uir.artifacts, uiReviewReport: (uir.report || "").slice(0, 2048) }
+        );
+        if (!uir.passed) {
+          log("warn", "orchestrated_loop: ui_review failed", { taskId: task.taskId, exitCode: uir.exitCode });
+          return {
+            status: "ui_review_fail",
+            output: { stdout: uir.stdout || "", stderr: uir.stderr || "", truncated: false },
+            meta: { ...reviewResult.meta, reviewVerdict: "pass", reviewIteration: iter, reviewMaxIterations: maxIter, orchestratePhase: "ui_review", uiReviewPassed: false, uiReviewExitCode: uir.exitCode, uiReviewArtifacts: uir.artifacts, uiReviewReport: (uir.report || "").slice(0, 2048), reviewLoopDurationMs: Date.now() - loopStart },
+          };
+        }
+        log("info", "orchestrated_loop: ui_review passed", { taskId: task.taskId });
+      }
+
+      const hasUiReview = task.uiReview && CFG.uiReviewEnabled;
       return {
-        status: "review_pass",
+        status: hasUiReview ? "ui_review_pass" : "review_pass",
         output: reviewResult.output,
         meta: {
           ...reviewResult.meta,
           reviewVerdict: "pass",
           reviewIteration: iter,
           reviewMaxIterations: maxIter,
-          orchestratePhase: "review",
+          orchestratePhase: hasUiReview ? "ui_review" : "review",
+          ...(hasUiReview ? { uiReviewPassed: true } : {}),
           reviewLoopDurationMs: Date.now() - loopStart,
         },
       };
@@ -1837,12 +1903,14 @@ function buildPlan(task) {
   const branch = task.scope?.branch || "branch";
   if (task.orchestratedLoop) {
     const maxIter = task.maxReviewIterations || CFG.reviewMaxIterations;
-    return [
+    const orchSteps = [
       "validate",
       `checkout ${branch}`,
       `orchestrated_loop: implement→review[→patch→review]* (max ${maxIter} iters, model: ${model})`,
-      "report",
     ];
+    if (task.uiReview && CFG.uiReviewEnabled) orchSteps.push("ui_review");
+    orchSteps.push("report");
+    return orchSteps;
   }
   if (task.reviewLoop && task.mode === "review") {
     const maxIter = task.maxReviewIterations || CFG.reviewMaxIterations;
@@ -1859,6 +1927,7 @@ function buildPlan(task) {
     `spawn claude (${model})`,
   ];
   if (task.requireReviewGate) steps.push("review_gate");
+  if (task.uiReview && CFG.uiReviewEnabled) steps.push("ui_review");
   steps.push("report");
   return steps;
 }
@@ -3350,6 +3419,22 @@ async function processTask(task, slotCtx) {
         `review gate enforced: ${result.meta.reviewGateReason}`,
         { reviewGateEnforced: true, reviewGateReason: result.meta.reviewGateReason }
       );
+    }
+
+    // ── UI REVIEW GATE (Phase 5A) for non-orchestrated tasks ──
+    if (task.uiReview && CFG.uiReviewEnabled && !task.orchestratedLoop &&
+        (result.status === "completed" || result.status === "review_pass")) {
+      const repoPath = task.scope?.repoPath || ".";
+      const uir = await runUiReview(task, repoPath);
+      result.meta.uiReviewPassed = uir.passed;
+      result.meta.uiReviewExitCode = uir.exitCode;
+      result.meta.uiReviewArtifacts = uir.artifacts;
+      result.meta.uiReviewReport = (uir.report || "").slice(0, 2048);
+      await sendEvent(task, uir.passed ? "ui_review_pass" : "ui_review_fail", "ui_review",
+        uir.passed ? "UI smoke tests passed" : "UI smoke tests failed",
+        { uiReviewPassed: uir.passed, uiReviewExitCode: uir.exitCode, uiReviewArtifacts: uir.artifacts, uiReviewReport: (uir.report || "").slice(0, 2048) }
+      );
+      result.status = uir.passed ? "ui_review_pass" : "ui_review_fail";
     }
 
     // ── MERGE SAFETY GATE (Stage W3) ──
