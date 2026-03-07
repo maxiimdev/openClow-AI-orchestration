@@ -6,6 +6,7 @@ export default defineNuxtPlugin((nuxtApp) => {
       queries: {
         staleTime: 5000,
         retry: 1,
+        refetchOnWindowFocus: 'always',
       },
     },
   })

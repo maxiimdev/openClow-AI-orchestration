@@ -101,6 +101,14 @@ export interface AuthResponse {
   user: { id: number; firstName: string; username: string }
 }
 
+export interface ReviewDiffSummary {
+  previousIteration: number
+  currentIteration: number
+  findingsResolved: Finding[]
+  findingsRemaining: Finding[]
+  findingsNew: Finding[]
+}
+
 export interface SSEMessage {
   taskId: string
   status: WorkerStatus

@@ -1,9 +1,13 @@
 <script setup lang="ts">
 import { useTasksList } from '~/composables/useTasks'
 import { truncateId, formatRelativeTime } from '~/lib/mappers'
+import { useTimestampTick } from '~/composables/useTimestampTick'
 
 const { data, isPending, error, refetch } = useTasksList({ status: 'needs_input' })
 const tasks = computed(() => data.value?.tasks ?? [])
+
+// Force timestamp re-evaluation every 30s
+const _tick = useTimestampTick()
 </script>
 
 <template>

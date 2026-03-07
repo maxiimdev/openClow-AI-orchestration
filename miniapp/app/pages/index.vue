@@ -1,8 +1,12 @@
 <script setup lang="ts">
 import { useTasksList } from '~/composables/useTasks'
 import { getReviewSummary } from '~/lib/reviews'
+import { useTimestampTick } from '~/composables/useTimestampTick'
 
 const { data: allTasks, isPending, error, refetch } = useTasksList()
+
+// Force timestamp re-evaluation every 30s
+const _tick = useTimestampTick()
 
 const tasks = computed(() => allTasks.value?.tasks ?? [])
 const activeTasks = computed(() =>
@@ -33,24 +37,24 @@ const reviewSummary = computed(() =>
 
     <ErrorState v-else-if="error" :message="(error as Error).message" @retry="refetch()" />
 
-    <div v-else class="grid grid-cols-3 gap-4 mt-4">
-      <NuxtLink to="/tasks" class="rounded-lg border p-4 text-center hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" aria-label="Active tasks">
-        <div class="text-3xl font-bold text-info">{{ activeTasks }}</div>
-        <div class="text-sm text-muted-foreground mt-1">Active</div>
+    <div v-else class="grid grid-cols-3 gap-3 sm:gap-4 mt-4">
+      <NuxtLink to="/tasks" class="rounded-lg border p-3 sm:p-4 text-center hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" aria-label="Active tasks">
+        <div class="text-2xl sm:text-3xl font-bold text-info">{{ activeTasks }}</div>
+        <div class="text-xs sm:text-sm text-muted-foreground mt-1">Active</div>
       </NuxtLink>
-      <NuxtLink to="/inbox" class="rounded-lg border p-4 text-center hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" aria-label="Tasks awaiting input">
-        <div class="text-3xl font-bold text-warning">{{ pendingInput }}</div>
-        <div class="text-sm text-muted-foreground mt-1">Awaiting Input</div>
+      <NuxtLink to="/inbox" class="rounded-lg border p-3 sm:p-4 text-center hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" aria-label="Tasks awaiting input">
+        <div class="text-2xl sm:text-3xl font-bold text-warning">{{ pendingInput }}</div>
+        <div class="text-xs sm:text-sm text-muted-foreground mt-1">Awaiting Input</div>
       </NuxtLink>
-      <NuxtLink to="/reviews" class="rounded-lg border p-4 text-center hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" aria-label="Review tasks">
-        <div class="text-3xl font-bold" :class="reviewSummary.escalated ? 'text-destructive' : reviewSummary.failed ? 'text-severity-major' : 'text-success'">
+      <NuxtLink to="/reviews" class="rounded-lg border p-3 sm:p-4 text-center hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" aria-label="Review tasks">
+        <div class="text-2xl sm:text-3xl font-bold" :class="reviewSummary.escalated ? 'text-destructive' : reviewSummary.failed ? 'text-severity-major' : 'text-success'">
           {{ reviewSummary.total }}
         </div>
-        <div class="text-sm text-muted-foreground mt-1">Reviews</div>
+        <div class="text-xs sm:text-sm text-muted-foreground mt-1">Reviews</div>
       </NuxtLink>
     </div>
 
-    <div v-if="completedTasks || failedTasks" class="grid grid-cols-2 gap-4 mt-4">
+    <div v-if="completedTasks || failedTasks" class="grid grid-cols-2 gap-3 sm:gap-4 mt-4">
       <NuxtLink to="/tasks?status=completed" class="rounded-lg border p-3 text-center hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" aria-label="Completed tasks">
         <div class="text-2xl font-bold text-success">{{ completedTasks }}</div>
         <div class="text-xs text-muted-foreground mt-1">Completed</div>
