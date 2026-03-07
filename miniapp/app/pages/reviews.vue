@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { useTasksList } from '~/composables/useTasks'
 import { truncateId, formatRelativeTime } from '~/lib/mappers'
-import { filterReviewTasks, getReviewSummary, getReviewCardSummary, countFindingsBySeverity } from '~/lib/reviews'
+import { filterReviewTasks, getReviewSummary, getReviewCardSummary, countFindingsBySeverity, canRequestPatch, getIterationInfo } from '~/lib/reviews'
 
 const { data, isPending, error, refetch } = useTasksList()
 
@@ -90,6 +90,15 @@ const findingsByTask = computed(() => {
                 {{ count }} {{ sev }}
               </span>
             </template>
+          </div>
+
+          <!-- Action hint for review_fail / escalated -->
+          <div v-if="task.status === 'review_fail' && canRequestPatch(task)" class="mt-2 flex items-center gap-1.5 text-xs text-severity-major-foreground">
+            <span>Patch available</span>
+            <span v-if="getIterationInfo(task)" class="text-muted-foreground">({{ getIterationInfo(task)?.remaining }} iterations left)</span>
+          </div>
+          <div v-else-if="task.status === 'escalated'" class="mt-2 text-xs text-severity-critical-foreground">
+            Manual intervention required
           </div>
 
           <div class="mt-2 text-xs text-muted-foreground/70">
