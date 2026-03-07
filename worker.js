@@ -3517,6 +3517,27 @@ async function processTask(task, slotCtx) {
       await sendEvent(task, "failed", "report", "task failed", result.meta);
     }
 
+    // ── HARD GUARD: completed must have non-empty result body ──
+    // Unconditional safety net — catches paths that bypass validateReportContract
+    // (e.g. needs_input fallback resetting status to completed, allowShortReport, or config-disabled contract).
+    if (result.status === "completed") {
+      const finalResultText = extractClaudeResult(result.output.stdout);
+      if (finalResultText === null || finalResultText.trim() === "") {
+        log("error", "empty_result_hard_guard", {
+          taskId: task.taskId,
+          resultLength: finalResultText ? finalResultText.length : 0,
+          msg: "completed status blocked: result body is empty/whitespace-only",
+        });
+        result.status = "failed";
+        result.meta.failureReason = "empty_result";
+        result.meta.emptyResultGuard = true;
+        await sendEvent(task, "failed", "report",
+          "hard guard: completed status blocked — result body is empty/whitespace-only",
+          { emptyResultGuard: true }
+        );
+      }
+    }
+
     // ── REPORT ──
     await sendEvent(task, "progress", "report", "reporting result", {
       stepIndex: stepTotal,
