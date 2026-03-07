@@ -63,7 +63,7 @@ const CFG = {
   worktreeRecoveryEnabled: (process.env.WORKTREE_RECOVERY_ENABLED || "true").toLowerCase() === "true",
   // Report contract guardrails
   reportContractEnabled:
-    (process.env.REPORT_CONTRACT_ENABLED || "false").toLowerCase() === "true",
+    (process.env.REPORT_CONTRACT_ENABLED || "true").toLowerCase() === "true",
   reportMinLength: int("REPORT_MIN_LENGTH", 50),
   reportRetryEnabled:
     (process.env.REPORT_RETRY_ENABLED || "false").toLowerCase() === "true",
@@ -743,6 +743,16 @@ function buildV2Output(taskId, output) {
   };
 }
 
+// ── TERMINAL STATUS INVARIANTS ───────────────────────────────────────────────
+const TERMINAL_REQUIRES_RESULT = new Set(["completed", "review_pass", "review_fail"]);
+const RESULT_INVARIANT_EXEMPT_MODES = new Set(["dry_run"]);
+const _telemetryCounters = {
+  report_contract_fail: 0, empty_result_guard_hits: 0,
+  retry_attempts: 0, retry_successes: 0, retry_failures: 0,
+  schema_repairs: 0, schema_repair_failures: 0,
+};
+function getTelemetryCounters() { return { ..._telemetryCounters }; }
+
 // ── NEEDS_INPUT PARSER ────────────────────────────────────────────────────────
 
 function extractClaudeResult(stdout) {
@@ -763,6 +773,25 @@ function extractClaudeResult(stdout) {
     if (typeof obj.result === "string") return obj.result;
   } catch { /* not JSON */ }
   return null;
+}
+
+function enforceNonEmptyResultInvariant(task, result) {
+  if (!TERMINAL_REQUIRES_RESULT.has(result.status)) return { enforced: false };
+  if (RESULT_INVARIANT_EXEMPT_MODES.has(task.mode)) return { enforced: false };
+  if (task.allowEmptyResult === true) return { enforced: false };
+  const resultText = extractClaudeResult(result.output.stdout);
+  if (resultText !== null && resultText.trim() !== "") return { enforced: false };
+  const originalStatus = result.status;
+  _telemetryCounters.empty_result_guard_hits++;
+  log("error", "empty_result_invariant_enforced", {
+    taskId: task.taskId, originalStatus, mode: task.mode,
+    resultLength: resultText ? resultText.length : 0,
+  });
+  result.status = "failed";
+  result.meta.failureReason = "empty_result";
+  result.meta.emptyResultGuard = true;
+  result.meta.emptyResultOriginalStatus = originalStatus;
+  return { enforced: true, originalStatus };
 }
 
 // ── REPORT CONTRACT VALIDATION ───────────────────────────────────────────────
@@ -3339,22 +3368,27 @@ async function processTask(task, slotCtx) {
     }
 
     // ── REPORT CONTRACT GUARDRAIL ──
-    if (result.status === "completed") {
+    // Covers all terminal statuses that require a substantive result body.
+    if (TERMINAL_REQUIRES_RESULT.has(result.status) && !RESULT_INVARIANT_EXEMPT_MODES.has(task.mode)) {
       const violation = validateReportContract(result.output.stdout, task);
       if (violation) {
+        _telemetryCounters.report_contract_fail++;
         log("warn", "report_contract_violation", {
           taskId: task.taskId,
+          status: result.status,
           reason: violation.reason,
           length: violation.length,
           pattern: violation.pattern,
+          telemetry: getTelemetryCounters(),
         });
         await sendEvent(task, "report_contract_invalid", "report_contract",
           violation.message,
-          { reason: violation.reason, length: violation.length, pattern: violation.pattern }
+          { reason: violation.reason, length: violation.length, pattern: violation.pattern, status: result.status, telemetry: getTelemetryCounters() }
         );
 
         let retried = false;
         if (CFG.reportRetryEnabled && task.reportRetryOnViolation !== false) {
+          _telemetryCounters.retry_attempts++;
           log("info", "report_contract_retry", { taskId: task.taskId });
           await sendEvent(task, "report_retry_attempt", "report_contract",
             "Retrying task in report-only mode after contract violation",
@@ -3369,10 +3403,12 @@ async function processTask(task, slotCtx) {
           const retryResult = await executeTask(retryTask, stepCtxMain);
           const retryViolation = validateReportContract(retryResult.output.stdout, task);
           if (!retryViolation) {
+            _telemetryCounters.retry_successes++;
             log("info", "report_contract_retry_success", { taskId: task.taskId });
             result = retryResult;
             retried = true;
           } else {
+            _telemetryCounters.retry_failures++;
             log("warn", "report_contract_retry_failed", {
               taskId: task.taskId,
               retryReason: retryViolation.reason,
@@ -3389,7 +3425,8 @@ async function processTask(task, slotCtx) {
     }
 
     // ── REPORT SCHEMA GUARDRAIL ──
-    if (result.status === "completed") {
+    // Covers completed and review_pass.
+    if (result.status === "completed" || result.status === "review_pass") {
       const schemaViolation = validateReportSchema(result.output.stdout, task);
       if (schemaViolation) {
         log("warn", "report_schema_invalid", {
@@ -3424,6 +3461,9 @@ async function processTask(task, slotCtx) {
             result.output.stdout = repairedStdout;
             result.meta.reportSchemaRepaired = repair.repairedKeys;
             schemaRepaired = true;
+            _telemetryCounters.schema_repairs++;
+          } else {
+            _telemetryCounters.schema_repair_failures++;
           }
         }
 
@@ -3517,25 +3557,14 @@ async function processTask(task, slotCtx) {
       await sendEvent(task, "failed", "report", "task failed", result.meta);
     }
 
-    // ── HARD GUARD: completed must have non-empty result body ──
-    // Unconditional safety net — catches paths that bypass validateReportContract
-    // (e.g. needs_input fallback resetting status to completed, allowShortReport, or config-disabled contract).
-    if (result.status === "completed") {
-      const finalResultText = extractClaudeResult(result.output.stdout);
-      if (finalResultText === null || finalResultText.trim() === "") {
-        log("error", "empty_result_hard_guard", {
-          taskId: task.taskId,
-          resultLength: finalResultText ? finalResultText.length : 0,
-          msg: "completed status blocked: result body is empty/whitespace-only",
-        });
-        result.status = "failed";
-        result.meta.failureReason = "empty_result";
-        result.meta.emptyResultGuard = true;
-        await sendEvent(task, "failed", "report",
-          "hard guard: completed status blocked — result body is empty/whitespace-only",
-          { emptyResultGuard: true }
-        );
-      }
+    // ── HARD INVARIANT: terminal statuses must have non-empty result body ──
+    // Unified safety net covering completed, review_pass, and review_fail.
+    const invariantResult = enforceNonEmptyResultInvariant(task, result);
+    if (invariantResult.enforced) {
+      await sendEvent(task, "failed", "empty_result_invariant",
+        `hard invariant: ${invariantResult.originalStatus} status blocked — result body is empty/whitespace-only`,
+        { emptyResultGuard: true, originalStatus: invariantResult.originalStatus, telemetry: getTelemetryCounters() }
+      );
     }
 
     // ── REPORT ──
