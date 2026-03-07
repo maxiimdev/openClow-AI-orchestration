@@ -4,14 +4,21 @@ import { getReviewSummary } from '~/lib/reviews'
 
 const { data: allTasks, isPending, error, refetch } = useTasksList()
 
+const tasks = computed(() => allTasks.value?.tasks ?? [])
 const activeTasks = computed(() =>
-  allTasks.value?.tasks.filter(t => t.status === 'running' || t.status === 'at_risk').length ?? 0
+  tasks.value.filter(t => t.status === 'running' || t.status === 'at_risk').length
 )
 const pendingInput = computed(() =>
-  allTasks.value?.tasks.filter(t => t.status === 'needs_input').length ?? 0
+  tasks.value.filter(t => t.status === 'needs_input').length
+)
+const completedTasks = computed(() =>
+  tasks.value.filter(t => t.status === 'completed').length
+)
+const failedTasks = computed(() =>
+  tasks.value.filter(t => t.status === 'failed').length
 )
 const reviewSummary = computed(() =>
-  getReviewSummary(allTasks.value?.tasks ?? [])
+  getReviewSummary(tasks.value)
 )
 </script>
 
@@ -40,6 +47,17 @@ const reviewSummary = computed(() =>
           {{ reviewSummary.total }}
         </div>
         <div class="text-sm text-muted-foreground mt-1">Reviews</div>
+      </NuxtLink>
+    </div>
+
+    <div v-if="completedTasks || failedTasks" class="grid grid-cols-2 gap-4 mt-4">
+      <NuxtLink to="/tasks?status=completed" class="rounded-lg border p-3 text-center hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" aria-label="Completed tasks">
+        <div class="text-2xl font-bold text-success">{{ completedTasks }}</div>
+        <div class="text-xs text-muted-foreground mt-1">Completed</div>
+      </NuxtLink>
+      <NuxtLink to="/tasks?status=failed" class="rounded-lg border p-3 text-center hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" aria-label="Failed tasks">
+        <div class="text-2xl font-bold text-destructive">{{ failedTasks }}</div>
+        <div class="text-xs text-muted-foreground mt-1">Failed</div>
       </NuxtLink>
     </div>
 

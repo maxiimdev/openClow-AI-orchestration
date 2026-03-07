@@ -36,7 +36,27 @@ const events = computed(() => eventsData.value?.events ?? [])
           <span v-if="task.branch">{{ task.branch }}</span>
         </div>
         <p v-if="task.message" class="mt-2 text-sm text-muted-foreground">{{ task.message }}</p>
-        <div class="mt-2 text-xs text-muted-foreground/70">Updated {{ formatRelativeTime(task.updatedAt) }}</div>
+        <div class="mt-2 flex items-center gap-3 text-xs text-muted-foreground/70">
+          <span>Created {{ formatRelativeTime(task.createdAt) }}</span>
+          <span>Updated {{ formatRelativeTime(task.updatedAt) }}</span>
+        </div>
+      </div>
+
+      <!-- Reviewer action banner -->
+      <div v-if="task.status === 'review_fail'" class="rounded-lg border border-severity-major bg-severity-major-muted p-4 mb-4">
+        <div class="flex items-center gap-2 mb-1">
+          <span class="font-medium text-severity-major-foreground text-sm">Patch Required</span>
+          <span v-if="task.meta.reviewIteration" class="text-xs text-muted-foreground">
+            (iteration {{ task.meta.reviewIteration }}<span v-if="task.meta.reviewMaxIterations"> of {{ task.meta.reviewMaxIterations }}</span>)
+          </span>
+        </div>
+        <p class="text-xs text-muted-foreground">This review found issues that must be fixed. A patch task will address the findings below, then trigger a re-review.</p>
+      </div>
+      <div v-else-if="task.status === 'escalated'" class="rounded-lg border border-severity-critical bg-severity-critical-muted p-4 mb-4">
+        <div class="flex items-center gap-2 mb-1">
+          <span class="font-medium text-severity-critical-foreground text-sm">Escalated — Manual Review Needed</span>
+        </div>
+        <p class="text-xs text-muted-foreground">Max review iterations reached. The findings below could not be auto-resolved and require human intervention.</p>
       </div>
 
       <!-- Needs input form -->
