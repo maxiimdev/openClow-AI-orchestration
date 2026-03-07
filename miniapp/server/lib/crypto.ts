@@ -27,6 +27,15 @@ const JWT_SECRET = () => getJwtSecret()
 const TOKEN_TTL_S = 86400 // 24 h
 const TICKET_TTL_MS = 30_000 // 30 s
 
+/**
+ * Short fingerprint of the current JWT secret.
+ * Changes when the secret rotates — clients use this to namespace stored tokens
+ * so stale tokens from a previous secret are never sent.
+ */
+export function getSecretFingerprint(): string {
+  return createHmac('sha256', 'miniapp-key-id').update(JWT_SECRET()).digest('hex').slice(0, 8)
+}
+
 // ---------------------------------------------------------------------------
 // 1. Telegram initData HMAC-SHA256 validation
 //    https://core.telegram.org/bots/webapps#validating-data-received-via-the-mini-app

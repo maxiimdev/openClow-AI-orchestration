@@ -7,9 +7,25 @@ const authStore = useAuthStore()
 const { login } = useAuth()
 const sse = useSSE()
 
+// Ensure dark class is set as early as possible (SSR head injection avoids FOUC)
+useHead({
+  htmlAttrs: { class: 'dark' },
+})
+
 onMounted(async () => {
-  // Default to dark theme (shadcn convention: class on <html>)
-  document.documentElement.classList.add('dark')
+  // Listen for auth state changes from api.ts auto-login interceptor
+  window.addEventListener('miniapp:auth-updated', ((e: CustomEvent) => {
+    const { token, user, tokenVersion } = e.detail
+    authStore.setAuth(token, user, tokenVersion)
+    // Reconnect SSE with fresh credentials
+    sse.disconnect()
+    sse.connect()
+  }) as EventListener)
+
+  window.addEventListener('miniapp:auth-cleared', () => {
+    authStore.clearAuth()
+    sse.disconnect()
+  })
 
   authStore.restoreFromStorage()
 

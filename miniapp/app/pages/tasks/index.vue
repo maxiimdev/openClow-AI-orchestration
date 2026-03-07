@@ -3,6 +3,8 @@ import { useTasksList } from '~/composables/useTasks'
 import { applyFilters } from '~/lib/filters'
 import { getStatusLabel } from '~/lib/mappers'
 import type { UserStatus } from '~/lib/types'
+import Input from '~/components/ui/input/Input.vue'
+import Button from '~/components/ui/button/Button.vue'
 
 const statusFilter = ref<UserStatus | ''>('')
 const searchQuery = ref('')
@@ -21,28 +23,29 @@ const statuses: (UserStatus | '')[] = ['', 'running', 'at_risk', 'completed', 'f
     <h1 class="text-2xl font-bold mb-4">Tasks</h1>
     <StaleIndicator />
 
-    <input
+    <Input
       v-model="searchQuery"
       type="text"
       placeholder="Search tasks..."
       aria-label="Search tasks"
-      class="w-full rounded-md border border-input bg-background px-3 py-2 text-sm mb-3 focus:outline-none focus:ring-1 focus:ring-ring"
-    >
+      class="mb-3"
+    />
 
     <div class="flex gap-2 overflow-x-auto pb-2" role="group" aria-label="Filter by status">
-      <button
+      <Button
         v-for="s in statuses" :key="s"
-        class="whitespace-nowrap rounded-full px-3 py-1 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-        :class="statusFilter === s ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground hover:bg-accent'"
+        :variant="statusFilter === s ? 'default' : 'secondary'"
+        size="sm"
+        class="whitespace-nowrap rounded-full"
         :aria-pressed="statusFilter === s"
         @click="statusFilter = s"
       >
         {{ s ? getStatusLabel(s) : 'All' }}
-      </button>
+      </Button>
     </div>
 
     <div v-if="isPending" class="space-y-3 mt-4">
-      <div v-for="i in 5" :key="i" class="h-20 rounded-lg bg-muted animate-pulse" />
+      <div v-for="i in 5" :key="i" class="h-20 rounded-xl bg-muted animate-pulse" />
     </div>
 
     <ErrorState v-else-if="error" :message="(error as Error).message" @retry="refetch()" />
