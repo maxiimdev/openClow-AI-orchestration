@@ -944,6 +944,15 @@ const REPORT_SCHEMAS = {
       { key: "tests" },
     ],
   },
+  // proof: for merge-run tasks — PR merge produces no code changelog or test run,
+  // but must prove the merge happened via evidence (command output) and commit hash.
+  proof: {
+    label: "proof",
+    sections: [
+      { key: "evidence" },
+      { key: "commit" },
+    ],
+  },
   compact: {
     label: "compact",
     sections: [], // no structured sections required
@@ -956,11 +965,16 @@ const STRICT_TASK_PATTERNS = [
 ];
 
 function resolveReportSchema(task) {
-  // 1. Explicit per-task override
+  // 1. Explicit per-task override (always wins)
   if (task.reportSchema && REPORT_SCHEMAS[task.reportSchema]) {
     return REPORT_SCHEMAS[task.reportSchema];
   }
-  // 2. Global strict mode: auto-detect from task intent
+  // 2. Merge-run tasks: proof schema (evidence + commit).
+  // changelog and tests are not applicable — the task merges a PR, not implements code.
+  if (task.mergeRun === true) {
+    return REPORT_SCHEMAS.proof;
+  }
+  // 3. Global strict mode: auto-detect from task intent
   if (CFG.reportSchemaStrict) {
     const text = `${task.instructions || ""} ${task.taskId || ""}`;
     for (const re of STRICT_TASK_PATTERNS) {
@@ -969,7 +983,7 @@ function resolveReportSchema(task) {
     // Default to standard when strict mode is on but task doesn't match strict patterns
     return REPORT_SCHEMAS.standard;
   }
-  // 3. No schema enforcement
+  // 4. No schema enforcement
   return null;
 }
 
