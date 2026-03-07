@@ -12,6 +12,13 @@ export default defineNuxtConfig({
 
   css: ['~/assets/css/main.css'],
 
+  runtimeConfig: {
+    // Server-only keys (never exposed to client).
+    // Override at runtime with NUXT_MINIAPP_JWT_SECRET / NUXT_TELEGRAM_BOT_TOKEN.
+    miniappJwtSecret: 'dev-jwt-secret-do-not-use-in-prod',
+    telegramBotToken: '',
+  },
+
   vite: {
     plugins: [tailwindcss()],
   },
