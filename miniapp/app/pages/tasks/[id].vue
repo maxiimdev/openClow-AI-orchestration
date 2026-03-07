@@ -2,6 +2,7 @@
 import { useTaskDetail } from '~/composables/useTasks'
 import { useTaskEvents } from '~/composables/useTaskEvents'
 import { truncateId, formatRelativeTime } from '~/lib/mappers'
+import { getReviewCardSummary } from '~/lib/reviews'
 
 const route = useRoute()
 const taskId = computed(() => route.params.id as string)
@@ -62,9 +63,16 @@ const events = computed(() => eventsData.value?.events ?? [])
         <pre v-if="task.result.stderr" class="mt-2 text-xs bg-severity-critical-muted text-severity-critical-foreground rounded p-2 overflow-x-auto max-h-32 overflow-y-auto">{{ task.result.stderr }}</pre>
       </div>
 
-      <!-- Findings -->
+      <!-- Review summary (for review_fail / escalated without structured findings) -->
+      <div v-if="(task.status === 'review_fail' || task.status === 'escalated') && !task.structuredFindings?.length && task.reviewFindings" class="rounded-lg border border-severity-major p-4 mb-4">
+        <h2 class="text-sm font-medium mb-2">Review Findings</h2>
+        <p class="text-sm text-muted-foreground">{{ task.reviewFindings }}</p>
+      </div>
+
+      <!-- Structured findings -->
       <div v-if="task.structuredFindings?.length" class="mb-4">
         <h2 class="text-sm font-medium mb-2">Review Findings</h2>
+        <p v-if="task.status === 'review_fail' || task.status === 'escalated'" class="text-sm text-muted-foreground mb-2">{{ getReviewCardSummary(task) }}</p>
         <FindingsPanel :findings="task.structuredFindings" />
       </div>
 

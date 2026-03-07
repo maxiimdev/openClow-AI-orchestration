@@ -91,6 +91,13 @@ export const mockTasks: Task[] = [
     updatedAt: ago(150),
     message: 'Task completed successfully',
     meta: { durationMs: 45000 },
+    result: {
+      stdout: 'Performance optimization complete. Reduced bundle size by 12%.',
+      stderr: '',
+      truncated: false,
+      exitCode: 0,
+      durationMs: 45000,
+    },
   },
   {
     id: 'task-006-escalated',
