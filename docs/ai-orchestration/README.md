@@ -10,6 +10,10 @@
 - `EXPERT_PACKS.md` — модель экспертности и структура пакетов ролей
 - `TOKEN_POLICY.md` — принципы экономии токенов и операционные лимиты
 - `DECISIONS_LOG.md` — журнал принятых решений и причин
+- `OPERATING_MODEL.md` — операционный стандарт v1.1 (source of truth, quality-gates, KPI)
+- `TASK_CONTRACT_TEMPLATE.md` — шаблон контракта задачи перед стартом
+- `UI_VERIFY_PROTOCOL.md` — протокол UI-проверки в браузере + сверка с макетом
+- `UI_EVIDENCE_TEMPLATE.md` — шаблон артефактов UI-проверки
 
 ## Как пользоваться
 1. Начинать с `SYSTEM_OVERVIEW.md`.

@@ -13,8 +13,8 @@
 
 ---
 
-## State machine (v1)
-`new -> plan -> approved -> implement -> review -> patch (optional loop) -> tests -> ready_pr -> done`
+## State machine (v1.1)
+`new -> plan -> approved -> implement -> review -> patch (optional loop) -> tests -> ui_verify (for UI tasks) -> ready_pr -> done`
 
 Дополнительные служебные статусы:
 - `blocked` — нужны данные/доступы/решение пользователя
@@ -115,11 +115,24 @@
 
 ---
 
+### 7.5) `ui_verify` (для UI-задач)
+**Что делает оркестратор/верификатор:**
+- открывает целевой URL в браузере;
+- прогоняет чеклист UI-сценариев;
+- сравнивает ожидаемое поведение с макетом (если задан Figma reference);
+- фиксирует evidence (скриншоты, отклонения, ошибки консоли).
+
+**Выход:**
+- `pass` (можно в `ready_pr`),
+- `fail` (возврат в `patch`),
+- `escalated` (если конфликт макет/требования).
+
 ### 8) `ready_pr`
 **Условия входа:**
 - implement завершен;
 - review пройден или замечания закрыты;
-- тестовый статус приемлемый.
+- тестовый статус приемлемый;
+- для UI-задач пройден `ui_verify`.
 
 **Что делаем:**
 - формируем PR;
