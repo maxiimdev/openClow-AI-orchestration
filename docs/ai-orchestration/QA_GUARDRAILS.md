@@ -63,6 +63,8 @@
 - [ ] Проверены ключевые UI states (default/hover/focus/disabled/error/loading).
 - [ ] Приложены скриншоты и список отклонений expected vs actual.
 - [ ] Проверки сделаны по `docs/ai-orchestration/UI_VERIFY_PROTOCOL.md`.
+- [ ] Явно указан `ui_verify_mode` (`auto|off|strict`) в Task Contract.
+- [ ] Если `ui_verify_mode=off`: есть причина, риск и явный human-ack в задаче/чате.
 
 ---
 

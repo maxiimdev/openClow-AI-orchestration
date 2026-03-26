@@ -95,4 +95,4 @@
 3. Добавить task-template (contract) в docs
 4. Включить quality-gate checklist в PR flow
 5. Утвердить git-policy по `feature/*` + nested repo
-6. Для UI-изменений подключить browser verify по `UI_VERIFY_PROTOCOL.md`
+6. Для UI-изменений подключить browser verify по `UI_VERIFY_PROTOCOL.md` (`ui_verify_mode=auto` по умолчанию)

@@ -23,3 +23,8 @@
 1. Wire PR checklist to enforce new gates.
 2. Run one pilot task in full mode (`spec -> build -> evidence -> verify -> fix`).
 3. Measure lead time/rework overhead and tune templates.
+
+### 2026-03-26 / Step 2 add-on
+- Added `ui_verify_mode` feature flag (`auto|off|strict`) to run/task templates.
+- Default behavior: `auto` (UI verify ON for UI tasks).
+- Safe override: `off` only with reason + human-ack.

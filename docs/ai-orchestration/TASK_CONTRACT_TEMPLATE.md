@@ -6,6 +6,7 @@
 - Scope IN:
 - Scope OUT:
 - Mode: `test-first` | `ui-first`
+- UI Verify mode: `auto` | `off` | `strict`
 - DoD:
 - Risks (2–5):
 - Rollback plan:
