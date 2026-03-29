@@ -559,16 +559,16 @@ a {
     transform: rotate(0deg)
   }
   90% {
-    -webkit-transform: rotate(3110deg);
-    transform: rotate(3110deg)
+    -webkit-transform: rotate(3376deg);
+    transform: rotate(3376deg)
   }
   95% {
-    -webkit-transform: rotate(3108deg);
-    transform: rotate(3108deg)
+    -webkit-transform: rotate(3374deg);
+    transform: rotate(3374deg)
   }
   100% {
-    -webkit-transform: rotate(3109deg);
-    transform: rotate(3109deg)
+    -webkit-transform: rotate(3375deg);
+    transform: rotate(3375deg)
   }
 }
 @-moz-keyframes spin {
@@ -577,16 +577,16 @@ a {
     transform: rotate(0deg)
   }
   90% {
-    -moz-transform: rotate(3110deg);
-    transform: rotate(3110deg)
+    -moz-transform: rotate(3376deg);
+    transform: rotate(3376deg)
   }
   95% {
-    -moz-transform: rotate(3108deg);
-    transform: rotate(3108deg)
+    -moz-transform: rotate(3374deg);
+    transform: rotate(3374deg)
   }
   100% {
-    -moz-transform: rotate(3109deg);
-    transform: rotate(3109deg)
+    -moz-transform: rotate(3375deg);
+    transform: rotate(3375deg)
   }
 }
 @-o-keyframes spin {
@@ -595,16 +595,16 @@ a {
     transform: rotate(0deg)
   }
   90% {
-    -o-transform: rotate(3110deg);
-    transform: rotate(3110deg)
+    -o-transform: rotate(3376deg);
+    transform: rotate(3376deg)
   }
   95% {
-    -o-transform: rotate(3108deg);
-    transform: rotate(3108deg)
+    -o-transform: rotate(3374deg);
+    transform: rotate(3374deg)
   }
   100% {
-    -o-transform: rotate(3109deg);
-    transform: rotate(3109deg)
+    -o-transform: rotate(3375deg);
+    transform: rotate(3375deg)
   }
 }
 @keyframes spin {
@@ -615,22 +615,22 @@ a {
     transform: rotate(0deg)
   }
   90% {
-    -webkit-transform: rotate(3110deg);
-    -moz-transform: rotate(3110deg);
-    -o-transform: rotate(3110deg);
-    transform: rotate(3110deg)
+    -webkit-transform: rotate(3376deg);
+    -moz-transform: rotate(3376deg);
+    -o-transform: rotate(3376deg);
+    transform: rotate(3376deg)
   }
   95% {
-    -webkit-transform: rotate(3108deg);
-    -moz-transform: rotate(3108deg);
-    -o-transform: rotate(3108deg);
-    transform: rotate(3108deg)
+    -webkit-transform: rotate(3374deg);
+    -moz-transform: rotate(3374deg);
+    -o-transform: rotate(3374deg);
+    transform: rotate(3374deg)
   }
   100% {
-    -webkit-transform: rotate(3109deg);
-    -moz-transform: rotate(3109deg);
-    -o-transform: rotate(3109deg);
-    transform: rotate(3109deg)
+    -webkit-transform: rotate(3375deg);
+    -moz-transform: rotate(3375deg);
+    -o-transform: rotate(3375deg);
+    transform: rotate(3375deg)
   }
 }
 .spinAround2 {
@@ -657,82 +657,82 @@ a {
 }
 @-webkit-keyframes spinTwo {
   0% {
-    -webkit-transform: rotate(3109deg);
-    transform: rotate(3109deg)
+    -webkit-transform: rotate(3375deg);
+    transform: rotate(3375deg)
   }
   90% {
-    -webkit-transform: rotate(6314deg);
-    transform: rotate(6314deg)
+    -webkit-transform: rotate(6481deg);
+    transform: rotate(6481deg)
   }
   95% {
-    -webkit-transform: rotate(6312deg);
-    transform: rotate(6312deg)
+    -webkit-transform: rotate(6479deg);
+    transform: rotate(6479deg)
   }
   100% {
-    -webkit-transform: rotate(6313deg);
-    transform: rotate(6313deg)
+    -webkit-transform: rotate(6480deg);
+    transform: rotate(6480deg)
   }
 }
 @-moz-keyframes spinTwo {
   0% {
-    -moz-transform: rotate(3109deg);
-    transform: rotate(3109deg)
+    -moz-transform: rotate(3375deg);
+    transform: rotate(3375deg)
   }
   90% {
-    -moz-transform: rotate(6314deg);
-    transform: rotate(6314deg)
+    -moz-transform: rotate(6481deg);
+    transform: rotate(6481deg)
   }
   95% {
-    -moz-transform: rotate(6312deg);
-    transform: rotate(6312deg)
+    -moz-transform: rotate(6479deg);
+    transform: rotate(6479deg)
   }
   100% {
-    -moz-transform: rotate(6313deg);
-    transform: rotate(6313deg)
+    -moz-transform: rotate(6480deg);
+    transform: rotate(6480deg)
   }
 }
 @-o-keyframes spinTwo {
   0% {
-    -o-transform: rotate(3109deg);
-    transform: rotate(3109deg)
+    -o-transform: rotate(3375deg);
+    transform: rotate(3375deg)
   }
   90% {
-    -o-transform: rotate(6314deg);
-    transform: rotate(6314deg)
+    -o-transform: rotate(6481deg);
+    transform: rotate(6481deg)
   }
   95% {
-    -o-transform: rotate(6312deg);
-    transform: rotate(6312deg)
+    -o-transform: rotate(6479deg);
+    transform: rotate(6479deg)
   }
   100% {
-    -o-transform: rotate(6313deg);
-    transform: rotate(6313deg)
+    -o-transform: rotate(6480deg);
+    transform: rotate(6480deg)
   }
 }
 @keyframes spinTwo {
   0% {
-    -webkit-transform: rotate(3109deg);
-    -moz-transform: rotate(3109deg);
-    -o-transform: rotate(3109deg);
-    transform: rotate(3109deg)
+    -webkit-transform: rotate(3375deg);
+    -moz-transform: rotate(3375deg);
+    -o-transform: rotate(3375deg);
+    transform: rotate(3375deg)
   }
   90% {
-    -webkit-transform: rotate(6314deg);
-    -moz-transform: rotate(6314deg);
-    -o-transform: rotate(6314deg);
-    transform: rotate(6314deg)
+    -webkit-transform: rotate(6481deg);
+    -moz-transform: rotate(6481deg);
+    -o-transform: rotate(6481deg);
+    transform: rotate(6481deg)
   }
   95% {
-    -webkit-transform: rotate(6312deg);
-    -moz-transform: rotate(6312deg);
-    -o-transform: rotate(6312deg);
-    transform: rotate(6312deg)
+    -webkit-transform: rotate(6479deg);
+    -moz-transform: rotate(6479deg);
+    -o-transform: rotate(6479deg);
+    transform: rotate(6479deg)
   }
   100% {
-    -webkit-transform: rotate(6313deg);
-    -moz-transform: rotate(6313deg);
-    -o-transform: rotate(6313deg);
-    transform: rotate(6313deg)
+    -webkit-transform: rotate(6480deg);
+    -moz-transform: rotate(6480deg);
+    -o-transform: rotate(6480deg);
+    transform: rotate(6480deg)
   }
 }
 @-webkit-keyframes showSweetAlert {
@@ -1800,8 +1800,8 @@ a {
   animation-fill-mode: forwards;
 }
 @keyframes spinThree {
-  0% { transform: rotate(6313deg); }
-  90% { transform: rotate(9518deg); }
-  95% { transform: rotate(9516deg); }
-  100% { transform: rotate(9517deg); }
+  0% { transform: rotate(6480deg); }
+  90% { transform: rotate(9631deg); }
+  95% { transform: rotate(9629deg); }
+  100% { transform: rotate(9630deg); }
 }
