@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "skills": {
+    "prompt-architect": {
+      "version": "1.0.0",
+      "installedAt": 1772542879859
+    },
+    "code-review": {
+      "version": "1.0.0",
+      "installedAt": 1772542891270
+    }
+  }
+}

@@ -1,0 +1,136 @@
+--2026-03-09 17:28:23--  https://moneystyle.net/usefull_landing_0602
+Resolving moneystyle.net (moneystyle.net)... 8.6.112.0, 8.47.69.0, 2a06:98c1:3122:8000::, ...
+Connecting to moneystyle.net (moneystyle.net)|8.6.112.0|:443... connected.
+HTTP request sent, awaiting response... 200 OK
+Length: unspecified [text/html]
+Saving to: ‘moneystyle.net/usefull_landing_0602.html’
+
+     0K .......... ....                                        5.05M=0.003s
+
+2026-03-09 17:28:23 (5.05 MB/s) - ‘moneystyle.net/usefull_landing_0602.html’ saved [14436]
+
+Loading robots.txt; please ignore errors.
+--2026-03-09 17:28:23--  https://moneystyle.net/robots.txt
+Reusing existing connection to moneystyle.net:443.
+HTTP request sent, awaiting response... 404 Not Found
+2026-03-09 17:28:23 ERROR 404: Not Found.
+
+--2026-03-09 17:28:23--  https://moneystyle.net/usefull_landing_0602/style02.css?ll-v=mhluesf3
+Reusing existing connection to moneystyle.net:443.
+HTTP request sent, awaiting response... 200 OK
+Length: 40270 (39K) [text/css]
+Saving to: ‘moneystyle.net/usefull_landing_0602/style02.css?ll-v=mhluesf3.css’
+
+     0K .......... .......... .......... .........            100% 1.16M=0.03s
+
+2026-03-09 17:28:24 (1.16 MB/s) - ‘moneystyle.net/usefull_landing_0602/style02.css?ll-v=mhluesf3.css’ saved [40270/40270]
+
+--2026-03-09 17:28:24--  https://moneystyle.net/usefull_landing_0602/jquery.min.js
+Reusing existing connection to moneystyle.net:443.
+HTTP request sent, awaiting response... 200 OK
+Length: 88145 (86K) [text/javascript]
+Saving to: ‘moneystyle.net/usefull_landing_0602/jquery.min.js’
+
+     0K .......... .......... .......... .......... .......... 58%  880K 0s
+    50K .......... .......... .......... ......               100% 1.95M=0.07s
+
+2026-03-09 17:28:24 (1.12 MB/s) - ‘moneystyle.net/usefull_landing_0602/jquery.min.js’ saved [88145/88145]
+
+--2026-03-09 17:28:24--  https://moneystyle.net/usefull_landing_0602/main03.js
+Reusing existing connection to moneystyle.net:443.
+HTTP request sent, awaiting response... 200 OK
+Length: 3555 (3.5K) [text/javascript]
+Saving to: ‘moneystyle.net/usefull_landing_0602/main03.js’
+
+     0K ...                                                   100% 4.87G=0s
+
+2026-03-09 17:28:24 (4.87 GB/s) - ‘moneystyle.net/usefull_landing_0602/main03.js’ saved [3555/3555]
+
+--2026-03-09 17:28:24--  https://moneystyle.net/usefull_landing_0602/wheel2.webp
+Reusing existing connection to moneystyle.net:443.
+HTTP request sent, awaiting response... 200 OK
+Length: 28140 (27K) [image/webp]
+Saving to: ‘moneystyle.net/usefull_landing_0602/wheel2.webp’
+
+     0K .......... .......... .......                         100% 3.00M=0.009s
+
+2026-03-09 17:28:24 (3.00 MB/s) - ‘moneystyle.net/usefull_landing_0602/wheel2.webp’ saved [28140/28140]
+
+--2026-03-09 17:28:24--  https://moneystyle.net/usefull_landing_0602/spin-button.png
+Reusing existing connection to moneystyle.net:443.
+HTTP request sent, awaiting response... 200 OK
+Length: 5586 (5.5K) [image/png]
+Saving to: ‘moneystyle.net/usefull_landing_0602/spin-button.png’
+
+     0K .....                                                 100% 2.90M=0.002s
+
+2026-03-09 17:28:24 (2.90 MB/s) - ‘moneystyle.net/usefull_landing_0602/spin-button.png’ saved [5586/5586]
+
+--2026-03-09 17:28:24--  https://moneystyle.net/usefull_landing_0602/like.png
+Reusing existing connection to moneystyle.net:443.
+HTTP request sent, awaiting response... 200 OK
+Length: 220 [image/png]
+Saving to: ‘moneystyle.net/usefull_landing_0602/like.png’
+
+     0K                                                       100%  309M=0s
+
+2026-03-09 17:28:24 (309 MB/s) - ‘moneystyle.net/usefull_landing_0602/like.png’ saved [220/220]
+
+--2026-03-09 17:28:24--  https://moneystyle.net/usefull_landing_0602/1.jpg
+Reusing existing connection to moneystyle.net:443.
+HTTP request sent, awaiting response... 200 OK
+Length: 3900 (3.8K) [image/jpeg]
+Saving to: ‘moneystyle.net/usefull_landing_0602/1.jpg’
+
+     0K ...                                                   100% 87.7M=0s
+
+2026-03-09 17:28:24 (87.7 MB/s) - ‘moneystyle.net/usefull_landing_0602/1.jpg’ saved [3900/3900]
+
+--2026-03-09 17:28:24--  https://moneystyle.net/usefull_landing_0602/2.jpg
+Reusing existing connection to moneystyle.net:443.
+HTTP request sent, awaiting response... 200 OK
+Length: 3694 (3.6K) [image/jpeg]
+Saving to: ‘moneystyle.net/usefull_landing_0602/2.jpg’
+
+     0K ...                                                   100% 41.5M=0s
+
+2026-03-09 17:28:24 (41.5 MB/s) - ‘moneystyle.net/usefull_landing_0602/2.jpg’ saved [3694/3694]
+
+--2026-03-09 17:28:24--  https://moneystyle.net/usefull_landing_0602/3.jpg
+Reusing existing connection to moneystyle.net:443.
+HTTP request sent, awaiting response... 200 OK
+Length: 1063 (1.0K) [image/jpeg]
+Saving to: ‘moneystyle.net/usefull_landing_0602/3.jpg’
+
+     0K .                                                     100%  686K=0.002s
+
+2026-03-09 17:28:24 (686 KB/s) - ‘moneystyle.net/usefull_landing_0602/3.jpg’ saved [1063/1063]
+
+--2026-03-09 17:28:24--  https://moneystyle.net/usefull_landing_0602/4.jpg
+Reusing existing connection to moneystyle.net:443.
+HTTP request sent, awaiting response... 200 OK
+Length: 1042 (1.0K) [image/jpeg]
+Saving to: ‘moneystyle.net/usefull_landing_0602/4.jpg’
+
+     0K .                                                     100%  439K=0.002s
+
+2026-03-09 17:28:25 (439 KB/s) - ‘moneystyle.net/usefull_landing_0602/4.jpg’ saved [1042/1042]
+
+--2026-03-09 17:28:25--  https://moneystyle.net/usefull_landing_0602/5.jpg
+Reusing existing connection to moneystyle.net:443.
+HTTP request sent, awaiting response... 200 OK
+Length: 3268 (3.2K) [image/jpeg]
+Saving to: ‘moneystyle.net/usefull_landing_0602/5.jpg’
+
+     0K ...                                                   100% 2.69G=0s
+
+2026-03-09 17:28:25 (2.69 GB/s) - ‘moneystyle.net/usefull_landing_0602/5.jpg’ saved [3268/3268]
+
+FINISHED --2026-03-09 17:28:25--
+Total wall clock time: 1.6s
+Downloaded: 12 files, 189K in 0.1s (1.47 MB/s)
+Converting links in moneystyle.net/usefull_landing_0602.html... 6.
+5-0
+Converting links in moneystyle.net/usefull_landing_0602/style02.css?ll-v=mhluesf3.css... 6.
+6-0
+Converted links in 2 files in 0.001 seconds.
